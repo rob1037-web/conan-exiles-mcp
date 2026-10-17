@@ -8,7 +8,8 @@
 # donc libtest les compte "passed". Le runner les en retire et affiche un compte séparé :
 #     Windows: X OK, Y ignorés
 set -euo pipefail
-exe="$1"
+# Chemin absolu avant tout changement de dossier : `cargo run` le passe en relatif.
+exe="$(realpath "$1")"
 shift
 cd /mnt/c
 win_temp="$(cmd.exe /C 'echo %TEMP%' 2>/dev/null | tr -d '\r')"
@@ -22,9 +23,14 @@ for dll in libgcc_s_seh-1.dll libwinpthread-1.dll libstdc++-6.dll; do
 done
 cd "$dest"
 
-# --nocapture est nécessaire pour voir les lignes SKIPPED ; sans effet si déjà présent.
+# --nocapture est nécessaire pour voir les lignes SKIPPED ; il ne concerne que les binaires
+# de test (dossier deps/), jamais les exemples ou binaires lancés par `cargo run`.
 args=("$@")
-case " ${args[*]:-} " in *" --nocapture "*) ;; *) args+=(--nocapture) ;; esac
+case "$exe" in
+    */deps/*)
+        case " ${args[*]:-} " in *" --nocapture "*) ;; *) args+=(--nocapture) ;; esac
+        ;;
+esac
 
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
