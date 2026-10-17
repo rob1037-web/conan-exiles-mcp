@@ -140,6 +140,18 @@ pub enum WriteError {
         column: String,
         header: String,
     },
+    #[error("ligne '{key}': colonne '{column}' absente de la ligne (colonnes de l'en-tête: {header}); aucune colonne n'est complétée automatiquement")]
+    MissingColumn {
+        key: String,
+        column: String,
+        header: String,
+    },
+    #[error("ligne '{key}': clé déjà présente dans la table (ligne {existing_line}, clé '{existing}'; comparaison insensible à la casse ASCII)")]
+    DuplicateKey {
+        key: String,
+        existing: String,
+        existing_line: usize,
+    },
 }
 
 impl Table {
@@ -168,11 +180,19 @@ impl Table {
     }
 
     /// Ajoute une ligne validée. Convention des nouvelles lignes, observée dans les
-    /// exports Devkit : clé non quotée, valeurs quotées. Les colonnes de l'en-tête
-    /// absentes de la ligne reçoivent une cellule vide quotée (`""`). Une colonne qui
-    /// n'existe pas dans l'en-tête est refusée.
+    /// exports Devkit : clé non quotée, valeurs quotées. Refuse, sans rien modifier :
+    /// une colonne inconnue de l'en-tête, une colonne de l'en-tête absente de la ligne
+    /// (jamais complétée en silence) et une clé déjà présente (casse ASCII ignorée,
+    /// comme les FName).
     pub fn push_row(&mut self, row: &Row) -> Result<(), WriteError> {
         let columns = &self.header.cells[1..];
+        let header_list = || {
+            columns
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         if let Some(bad) = row
             .cells
             .iter()
@@ -181,11 +201,28 @@ impl Table {
             return Err(WriteError::UnknownColumn {
                 key: row.key.clone(),
                 column: bad.column.clone(),
-                header: columns
-                    .iter()
-                    .map(|c| c.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                header: header_list(),
+            });
+        }
+        if let Some(h) = columns
+            .iter()
+            .find(|h| !row.cells.iter().any(|c| c.column == h.text))
+        {
+            return Err(WriteError::MissingColumn {
+                key: row.key.clone(),
+                column: h.text.clone(),
+                header: header_list(),
+            });
+        }
+        if let Some(existing) = self
+            .rows
+            .iter()
+            .find(|r| r.cells[0].text.eq_ignore_ascii_case(&row.key))
+        {
+            return Err(WriteError::DuplicateKey {
+                key: row.key.clone(),
+                existing: existing.cells[0].text.clone(),
+                existing_line: existing.line,
             });
         }
         let mut cells = Vec::with_capacity(self.header.cells.len());
@@ -199,7 +236,11 @@ impl Table {
                 .iter()
                 .find(|c| c.column == h.text)
                 .map(|c| c.raw.clone())
-                .unwrap_or_default();
+                .ok_or_else(|| WriteError::MissingColumn {
+                    key: row.key.clone(),
+                    column: h.text.clone(),
+                    header: header_list(),
+                })?;
             cells.push(CsvCell { text, quoted: true });
         }
         let last = self.rows.last().unwrap_or(&self.header);
@@ -439,7 +480,7 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::value::Value;
+    use crate::value::{Cell, Value};
     use std::path::Path;
 
     fn parse(s: &str) -> Result<Table, CsvError> {
@@ -721,24 +762,71 @@ mod tests {
         assert!(bytes.starts_with(&original));
     }
 
-    #[test]
-    fn pushed_row_keeps_raw_text_and_fills_missing_columns() {
-        let schema = Schema::from_toml_str(
+    fn two_col_schema() -> Schema {
+        Schema::from_toml_str(
             "name='t'\n[[fields]]\nname='A'\ntype='float'\n[[fields]]\nname='B'\ntype='int'\n",
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn raw(key: &str, cells: &[(&str, &str)]) -> RawRow {
+        RawRow {
+            line: 0,
+            key: key.into(),
+            cells: cells
+                .iter()
+                .map(|(c, v)| ((*c).into(), (*v).into()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn pushed_row_keeps_raw_text_exactly() {
         let mut t = parse("---,A,B\n").unwrap();
-        let row = validate_row(
-            &schema,
-            &RawRow {
-                line: 0,
-                key: "k".into(),
-                cells: vec![("A".into(), "1.50".into())],
-            },
-        )
-        .unwrap();
+        let row = validate_row(&two_col_schema(), &raw("k", &[("A", "1.50"), ("B", "")])).unwrap();
         t.push_row(&row).unwrap();
         assert_eq!(t.to_bytes(), b"---,A,B\nk,\"1.50\",\"\"\n");
+    }
+
+    #[test]
+    fn validate_row_then_push_never_completes_a_missing_column() {
+        // validate_row refuse déjà la colonne absente...
+        let schema = two_col_schema();
+        assert!(validate_row(&schema, &raw("k", &[("A", "1")])).is_err());
+        // ... et push_row refuse une Row construite à la main qui l'omet.
+        let mut t = parse("---,A,B\n").unwrap();
+        let row = Row {
+            line: 0,
+            key: "k".into(),
+            cells: vec![Cell {
+                column: "A".into(),
+                raw: "1".into(),
+                value: Value::Raw,
+            }],
+        };
+        let e = t.push_row(&row).unwrap_err();
+        assert!(matches!(e, WriteError::MissingColumn { ref column, .. } if column == "B"));
+        assert!(e.to_string().contains("colonnes de l'en-tête: A, B"));
+        assert!(t.rows.is_empty());
+    }
+
+    #[test]
+    fn push_row_rejects_duplicate_key_ignoring_ascii_case() {
+        let schema = two_col_schema();
+        let mut t = parse("---,A,B\nRow_A,\"1\",\"2\"\n").unwrap();
+        let cells = [("A", "1"), ("B", "2")];
+        for key in ["Row_A", "row_a", "ROW_A"] {
+            let row = validate_row(&schema, &raw(key, &cells)).unwrap();
+            let e = t.push_row(&row).unwrap_err();
+            assert!(
+                matches!(e, WriteError::DuplicateKey { existing_line: 2, ref existing, .. } if existing == "Row_A"),
+                "{key}"
+            );
+        }
+        assert_eq!(t.rows.len(), 1);
+        let ok = validate_row(&schema, &raw("Row_B", &cells)).unwrap();
+        t.push_row(&ok).unwrap();
+        assert_eq!(t.rows.len(), 2);
     }
 
     #[test]

@@ -96,12 +96,17 @@ pub fn validate_row(schema: &Schema, row: &RawRow) -> Result<Row, Vec<Validation
             Err(expected) => errors.push(err(Some(col), Some(raw), expected)),
         }
     }
-    for field in schema.fields.iter().filter(|f| f.required) {
+    // Toutes les colonnes du schéma doivent figurer dans la ligne, requises ou non :
+    // le Devkit exporte tous les champs. `required` ne porte que sur les cellules vides.
+    for field in &schema.fields {
         if !row.cells.iter().any(|(c, _)| *c == field.name) {
             errors.push(err(
                 Some(&field.name),
                 None,
-                format!("une valeur ({}, requis)", describe_type(&field.ty)),
+                format!(
+                    "une cellule pour cette colonne ({}; toutes les colonnes du schéma doivent figurer, une cellule vide est admise si le champ n'est pas requis)",
+                    describe_type(&field.ty)
+                ),
             ));
         }
     }
@@ -248,15 +253,28 @@ type = "raw"
         }
     }
 
+    /// Ligne complétée : les colonnes du schéma absentes de `cells` reçoivent une cellule
+    /// vide (valeur valide pour un champ non requis), `Label` (requis) reçoit "ok".
+    fn filled(cells: &[(&str, &str)]) -> RawRow {
+        let mut r = row(cells);
+        for f in &schema().fields {
+            if !cells.iter().any(|(c, _)| *c == f.name) {
+                let v = if f.name == "Label" { "ok" } else { "" };
+                r.cells.push((f.name.clone(), v.into()));
+            }
+        }
+        r
+    }
+
     fn errs(cells: &[(&str, &str)]) -> Vec<ValidationError> {
-        validate_row(&schema(), &row(cells)).unwrap_err()
+        validate_row(&schema(), &filled(cells)).unwrap_err()
     }
 
     #[test]
     fn valid_row_keeps_raw_text_and_order() {
         let r = validate_row(
             &schema(),
-            &row(&[
+            &filled(&[
                 ("Qty", "007"),
                 ("Label", "abc"),
                 ("Ratio", "0.50"),
@@ -287,7 +305,7 @@ type = "raw"
 
     #[test]
     fn optional_empty_cell_is_ok_required_empty_is_not() {
-        let r = validate_row(&schema(), &row(&[("Label", "a"), ("Qty", "")])).unwrap();
+        let r = validate_row(&schema(), &filled(&[("Label", "a"), ("Qty", "")])).unwrap();
         assert_eq!(r.cell("Qty").unwrap().value, Value::Empty);
         let e = errs(&[("Label", "")]);
         assert_eq!(e.len(), 1);
@@ -295,10 +313,13 @@ type = "raw"
     }
 
     #[test]
-    fn missing_required_column() {
-        let e = errs(&[("Qty", "1")]);
-        assert_eq!(e.len(), 1);
-        assert_eq!(e[0].received, None);
+    fn every_schema_column_must_be_present_required_or_not() {
+        // Seule "Label" est fournie : les 6 autres colonnes (dont les optionnelles) manquent.
+        let e = validate_row(&schema(), &row(&[("Label", "a")])).unwrap_err();
+        assert_eq!(e.len(), 6);
+        assert!(e.iter().all(|x| x.received.is_none()));
+        let cols: Vec<_> = e.iter().filter_map(|x| x.column.as_deref()).collect();
+        assert_eq!(cols, ["Qty", "Ratio", "On", "Cat", "Icon", "Extra"]);
         assert!(e[0].to_string().contains("colonne absente"));
     }
 
@@ -344,7 +365,7 @@ type = "raw"
 
     #[test]
     fn duplicate_column_and_empty_name() {
-        let mut r = row(&[("Label", "a"), ("Label", "b")]);
+        let mut r = filled(&[("Label", "a"), ("Label", "b")]);
         r.key = "  ".into();
         let e = validate_row(&schema(), &r).unwrap_err();
         assert_eq!(e.len(), 2);
@@ -355,6 +376,6 @@ type = "raw"
     #[test]
     fn string_length_counts_characters() {
         // 5 caractères mais 10 octets
-        assert!(validate_row(&schema(), &row(&[("Label", "éééé!")])).is_ok());
+        assert!(validate_row(&schema(), &filled(&[("Label", "éééé!")])).is_ok());
     }
 }
