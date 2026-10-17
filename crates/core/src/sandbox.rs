@@ -1,4 +1,5 @@
-//! Sandbox de chemins : le serveur ne lit et n'écrit que sous `MOD_ROOT`.
+//! Sandbox de chemins : toute lecture ou écriture passe par une racine (aujourd'hui `CSV_ROOT`;
+//! `MOD_ROOT` est en lecture seule, voir `store`).
 //!
 //! Deux couches :
 //!
@@ -13,7 +14,7 @@
 //!    est insensible à la casse), `\\?\` et les noms courts 8.3 sont normalisés par l'OS.
 //!
 //! # Limites connues (Phase 1, non traitées)
-//! - **Lien physique (hardlink)** : un fichier de `MOD_ROOT` qui est un lien physique vers un
+//! - **Lien physique (hardlink)** : un fichier de la racine qui est un lien physique vers un
 //!   fichier extérieur n'est pas détectable par son chemin ; l'écrire modifie le fichier
 //!   extérieur.
 //! - **TOCTOU** : entre la vérification (`resolve_*`) et l'ouverture du fichier, un autre
@@ -161,7 +162,7 @@ pub fn check_relative(path: &str) -> Result<Vec<&str>, SandboxError> {
     Ok(components)
 }
 
-/// Racine `MOD_ROOT` canonicalisée, à travers laquelle passent tous les accès disque.
+/// Racine (par ex. `CSV_ROOT`) canonicalisée, à travers laquelle passent tous les accès disque.
 #[derive(Debug, Clone)]
 pub struct Sandbox {
     root: PathBuf,
