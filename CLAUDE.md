@@ -14,27 +14,36 @@ Usage type : dans Claude, « génère 20 armes nordheimer ». Le serveur valide 
 - Générique par schéma : le serveur ne connaît aucun type de données en dur. Il lit des schémas TOML. Ajouter un nouveau type = ajouter un fichier de schéma, zéro code.
 
 ## Outils MCP exposés
-Serveur `rmcp` en stdio, configuré par `MOD_ROOT` (lecture seule, obligatoire) et `CSV_ROOT` (écriture, défaut `D:\ConanMod\csv`). Les erreurs sont des erreurs d'outil `ERREUR <code>: <message>`.
+Serveur `rmcp` en stdio, configuré par trois variables d'environnement : `MOD_ROOT` (lecture seule, obligatoire), `CSV_ROOT` (écriture, défaut `D:\ConanMod\csv`) et `SCHEMA_ROOT` (schémas, lecture seule, optionnel). Les erreurs sont des erreurs d'outil `ERREUR <code>: <message>`. Mode d'emploi : `docs/MODE_EMPLOI.md`.
 
 | Outil | Statut | Rôle |
 |---|---|---|
 | `list_mod_files` | Phase 2 (fait) | Liste les fichiers de `CSV_ROOT` par défaut ; `source:"mod"` pour le dossier du mod, en lecture seule. Jamais `.backup` ni `.<nom>.tmp-*` |
 | `read_datatable` | Phase 2 (fait) | Lit une DataTable CSV (en-tête, lignes, format) pour enrichir ou éviter les doublons. `CSV_ROOT` par défaut ; `source:"mod"` en lecture seule |
-| `write_datatable` | Phase 2 (fait) | Écrit un CSV sous `CSV_ROOT` à partir d'un **contenu CSV complet**. `dry_run` vaut true par défaut (aperçu = diff) ; toute écriture réelle, création comprise, exige `dry_run=false` ET `confirm=true` explicites ; sauvegarde dans `.backup` avant remplacement. Valide la syntaxe CSV, pas encore les colonnes contre un schéma |
-| `list_schemas` | Phase 3 | Liste les schémas disponibles |
-| `describe_schema` | Phase 3 | Renvoie les champs, types et contraintes d'un schéma, avec 2-3 lignes d'exemple |
-| `validate_rows` | Phase 3 | Valide des lignes contre un schéma et renvoie les erreurs ligne par ligne, sans rien écrire |
+| `list_schemas` | Phase 3a (fait) | Liste les schémas de `SCHEMA_ROOT` et leur validité (un schéma malformé est signalé avec fichier et champ) |
+| `describe_schema` | Phase 3a (fait) | Renvoie l'en-tête CSV attendu, les colonnes, types, obligatoires, bornes et valeurs d'enum d'une table |
+| `validate_rows` | Phase 3a (fait) | Valide des lignes fournies (`[clé, valeurs…]`) contre un schéma ; sans lignes, valide le CSV existant dans `CSV_ROOT` (diagnostic de corruption, sans réparation). Rapport structuré complet : ligne, clé, colonne, valeur, règle |
+| `write_datatable` | Phase 3a (fait) | Écrit un CSV sous `CSV_ROOT` à partir d'un **contenu CSV complet** pour une `table` donnée, **toujours validé par le schéma de la table**. `dry_run` vaut true par défaut (aperçu = diff par clé + rapport de validation) ; toute écriture réelle exige `dry_run=false` ET `confirm=true` explicites et un contenu valide ; sauvegarde dans `.backup` avant remplacement. Aucun mode « forcer » |
 
 Décisions :
-- Les outils de schéma (`list_schemas`, `describe_schema`, `validate_rows`) arrivent en Phase 3, via une variable d'environnement **optionnelle** `SCHEMA_ROOT` (dossier des schémas TOML). Sans elle, le serveur fonctionne comme aujourd'hui, sans ces outils.
-- `write_datatable` prend un contenu CSV complet. Les opérations par ligne (ajouter, modifier, supprimer des lignes) sont prévues en Phase 3. La validation par schéma de `write_datatable` ("refuse tout si une seule ligne est invalide") arrive avec `SCHEMA_ROOT`.
+- **Pas de schéma valide = pas d'écriture.** Si `SCHEMA_ROOT` est absent ou invalide, le serveur démarre, la lecture fonctionne, toute écriture (dry-run compris) est refusée (`SchemaRootUnavailable`). Même refus si le schéma de la table est absent (`SchemaMissing`) ou malformé (`SchemaMalformed`).
+- **Format de schéma : TOML conservé** (pas de JSON), un fichier `<table>.toml` par DataTable dans `SCHEMA_ROOT`, `name` identique au nom de la table. Champs : `name`, `description`, `key_column` (en-tête de la colonne clé dans le CSV exporté, `---` dans les exports Devkit ; **obligatoire** dans `SCHEMA_ROOT`), puis `[[fields]]` **ordonnés** (`name`, `type` = string|int|float|bool|enum|asset_ref|raw, `required`, `values` pour enum, bornes). Voir `schemas/DT_Purge_Nordheimer.toml`.
+- **Correspondance exacte des en-têtes** (noms, casse et ordre, colonne clé comprise) : tout écart est une *dérive de schéma* qui bloque l'écriture (`SchemaDrift`). Contrôles de valeurs : types, obligatoires, enums, unicité des clés (casse ASCII ignorée). Tous les écarts sont listés.
+- `write_datatable` prend un contenu CSV complet. Les opérations par ligne (ajouter, modifier, supprimer des lignes) sont prévues en Phase 3b.
 - Le format JSON (CSV/JSON) n'est pas géré à ce stade.
+- Les schémas ne sont jamais créés ni modifiés par l'outil (pas de génération automatique, pas de réparation de CSV).
+
+### Compatibilité des schémas déjà présents dans `schemas/`
+- `schemas/lightning_rod_loot.toml` et `schemas/exemple.toml` restent lisibles par le noyau (`key_column` est optionnel dans le parseur) et leurs tests passent, mais ils n'ont pas de `key_column` : **placés dans `SCHEMA_ROOT`, le serveur les refuse** (`SchemaMalformed`, « key_column obligatoire »). Migration d'une ligne : ajouter `key_column = "---"` (lightning_rod_loot, dont l'ordre des colonnes correspond déjà à l'export). Rien n'a été modifié ni supprimé en attendant l'accord.
+- `exemple.toml` est un exemple de format (types `asset_ref`, `raw`), pas une table réelle.
 
 ## Règles de sécurité (non négociables)
 - **Sandbox** : le serveur n'écrit que sous `CSV_ROOT` (variable d'env ; défaut `D:\ConanMod\csv`, hors du dossier du mod). Tout chemin qui en sort (`..`, chemin absolu, lien symbolique, jonction) est refusé.
+- **`SCHEMA_ROOT` est en lecture seule** (variable d'env, optionnelle) : même sandbox anti-évasion que les autres racines, aucune méthode d'écriture (`SchemaStore`), toute écriture qui se résout sous lui est refusée (`SchemaReadOnly`), et `CSV_ROOT` ne peut pas être situé sous lui.
 - **`MOD_ROOT` est en lecture seule** (variable d'env, sans défaut) : toute écriture qui se résout sous lui est refusée (`StoreError::ModReadOnly`), et `CSV_ROOT` ne peut pas être situé sous lui. Ne jamais toucher à `modinfo.json` ni `active.txt`. L'import CSV → DataTable reste manuel dans le Devkit.
 - **Jamais d'écrasement silencieux** : un fichier existant n'est remplacé qu'avec `confirm: true`, après sauvegarde dans `CSV_ROOT/.backup/<sous-dossier>/<nom>.<horodatage UTC>.<ext>` (si la sauvegarde échoue, rien n'est modifié). Écriture atomique (fichier temporaire du même dossier puis renommage). Les sauvegardes ne sont jamais purgées automatiquement (rétention à décider).
 - **Dry-run par défaut** : `write_datatable` renvoie d'abord un aperçu (diff). Via MCP, toute écriture réelle, y compris la création d'un fichier, demande `dry_run=false` ET `confirm=true`, explicites (sans `confirm=true`, erreur `ConfirmRequired`). Dans le noyau, `confirm` conditionne le remplacement d'un fichier existant.
+- **Validation obligatoire** : aucune écriture via MCP sans schéma valide ; le contenu est validé contre le schéma dans tous les cas (dry-run compris), l'écriture réelle est refusée si la validation échoue.
 - Les données reçues du client sont non fiables par principe. Tout est validé.
 
 ## Règles pour l'IA qui code
@@ -49,7 +58,7 @@ Décisions :
 crates/
   core/        # (package `conan-core`, pour ne pas masquer le crate `core` de std) schémas, validation, lecture/écriture CSV-JSON, sandbox (aucune dépendance MCP)
   mcp-server/  # binaire : déclaration des outils rmcp, branchés sur core
-schemas/       # un .toml par type de DataTable
+schemas/       # schémas TOML versionnés, un par DataTable (à copier dans SCHEMA_ROOT) + exemples
 fixtures/      # exports réels du Devkit pour les tests
 ```
 
@@ -75,8 +84,8 @@ fixtures/      # exports réels du Devkit pour les tests
 - [x] Branchement dans Claude Desktop (config `mcpServers`, voir `docs/claude-desktop.md`) et premier appel réel (validé : `list_mod_files` source=mod, `write_datatable` en dry-run)
 
 ### Phase 3 — Boucle réelle
-- [ ] `SCHEMA_ROOT` optionnel et outils `list_schemas`, `describe_schema`, `validate_rows` ; validation par schéma dans `write_datatable`
-- [ ] Opérations par ligne dans `write_datatable` (ajouter, modifier, supprimer des lignes)
+- [x] Phase 3a : `SCHEMA_ROOT` optionnel, outils `list_schemas`, `describe_schema`, `validate_rows`, validation par schéma obligatoire dans `write_datatable` (table de test `DT_Purge_Nordheimer`)
+- [ ] Phase 3b : opérations par ligne dans `write_datatable` (ajouter, modifier, supprimer des lignes)
 - [ ] Générer 20 lignes via Claude, réimporter dans le Devkit, vérifier en jeu
 - [ ] Chaque casse à l'import → nouveau test
 - [ ] Exporter une DataTable contenant du texte (virgules, guillemets, accents) pour valider les cas limites du CSV (tests actuellement marqués « non validé sur un export Devkit réel »)

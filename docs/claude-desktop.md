@@ -32,7 +32,8 @@ Développeur → Modifier la configuration). Ajouter l'entrée sous `mcpServers`
       "args": [],
       "env": {
         "MOD_ROOT": "D:\\Program Files\\CEUE5Devkit\\UE4\\Content\\Mods\\test",
-        "CSV_ROOT": "D:\\ConanMod\\csv"
+        "CSV_ROOT": "D:\\ConanMod\\csv",
+        "SCHEMA_ROOT": "D:\\ConanMod\\schemas"
       }
     }
   }
@@ -43,6 +44,8 @@ Puis **terminer TOUS les processus Claude** (Gestionnaire des tâches → onglet
 
 - `MOD_ROOT` : dossier du mod, **lecture seule** (obligatoire).
 - `CSV_ROOT` : dossier où les CSV sont écrits (défaut `D:\ConanMod\csv`), jamais sous `MOD_ROOT`.
+- `SCHEMA_ROOT` : dossier des schémas `.toml`, en lecture seule (optionnel). Sans lui, ou s'il est
+  invalide, le serveur démarre mais **toute écriture est refusée**. Voir [MODE_EMPLOI.md](MODE_EMPLOI.md).
 - Le serveur refuse de démarrer, avec un message sur stderr, si `MOD_ROOT` est absent ou
   invalide, ou si `CSV_ROOT` est situé sous `MOD_ROOT`.
 
@@ -52,6 +55,10 @@ Puis **terminer TOUS les processus Claude** (Gestionnaire des tâches → onglet
 |---|---|
 | `list_mod_files` | Liste les fichiers de `CSV_ROOT` (défaut) ou du mod (`source: "mod"`, lecture seule). Jamais `.backup` ni `.<nom>.tmp-*`. |
 | `read_datatable` | Lit un CSV (en-tête, lignes, format), pagination `offset` / `limit`. |
-| `write_datatable` | Écrit un CSV sous `CSV_ROOT`. **Aperçu (diff) par défaut** ; écriture réelle seulement avec `dry_run=false` ET `confirm=true`. Sauvegarde dans `.backup` avant tout remplacement. |
+| `list_schemas` | Liste les schémas de `SCHEMA_ROOT` et leur validité. |
+| `describe_schema` | En-tête attendu, types, obligatoires, valeurs d'enum d'une table. |
+| `validate_rows` | Valide des lignes (ou le CSV existant) contre le schéma, sans rien écrire. |
+| `write_datatable` | Écrit un CSV sous `CSV_ROOT`, **validé par schéma**. Aperçu (diff + rapport) par défaut ; écriture réelle seulement avec `dry_run=false` ET `confirm=true`. Sauvegarde dans `.backup` avant tout remplacement. |
 
-L'import CSV → DataTable reste manuel dans le Devkit.
+Mode d'emploi complet : [MODE_EMPLOI.md](MODE_EMPLOI.md). L'import CSV → DataTable reste manuel
+dans le Devkit.
