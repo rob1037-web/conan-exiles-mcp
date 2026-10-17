@@ -20,7 +20,11 @@ use std::path::{Component, Path, PathBuf};
 use crate::config::Config;
 use crate::csv::{CsvError, Table};
 use crate::diff::TableDiff;
+use crate::listing::{list_files, ListError, Listing};
 use crate::sandbox::{check_relative, Sandbox, SandboxError};
+
+/// Taille maximale d'un fichier lu par `read_csv` / `ModReader::read_file`.
+pub const MAX_READ_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Dossier des sauvegardes, sous `CSV_ROOT`. Jamais purgé automatiquement.
 pub const BACKUP_DIR: &str = ".backup";
@@ -46,6 +50,10 @@ pub enum StoreError {
         "chemin {path:?} refusé: le dossier {BACKUP_DIR} est réservé aux sauvegardes automatiques"
     )]
     ReservedPath { path: String },
+    #[error("fichier {path:?} trop gros ({size} octets, maximum {max}): lecture refusée")]
+    TooLarge { path: PathBuf, size: u64, max: u64 },
+    #[error(transparent)]
+    List(#[from] ListError),
     #[error("contenu refusé, ce n'est pas un CSV valide: {source}")]
     InvalidCsv { source: CsvError },
     #[error("le fichier existant {path:?} n'est pas un CSV lisible ({source}): comparaison impossible, il n'est pas modifié")]
@@ -190,10 +198,14 @@ impl CsvStore {
         ))
     }
 
-    /// Lit un CSV existant sous `CSV_ROOT`.
+    /// Lit un CSV existant sous `CSV_ROOT` (taille limitée à `MAX_READ_BYTES`).
     pub fn read_csv(&self, rel: &str) -> Result<Vec<u8>, StoreError> {
-        let path = self.csv.resolve_read(rel)?;
-        std::fs::read(&path).map_err(|source| StoreError::Io { path, source })
+        read_capped(&self.csv, rel)
+    }
+
+    /// Liste les fichiers de `CSV_ROOT` (ou d'un sous-dossier), sans `.backup` ni temporaires.
+    pub fn list_files(&self, subfolder: Option<&str>) -> Result<Listing, StoreError> {
+        Ok(list_files(&self.csv, subfolder)?)
     }
 
     /// Écrit un CSV sous `CSV_ROOT` (dossiers intermédiaires créés au besoin, sauf en
@@ -343,6 +355,55 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), StoreError> {
         return Err(io(e));
     }
     Ok(())
+}
+
+fn read_capped(sandbox: &Sandbox, rel: &str) -> Result<Vec<u8>, StoreError> {
+    let path = sandbox.resolve_read(rel)?;
+    let io = |source| StoreError::Io {
+        path: path.clone(),
+        source,
+    };
+    let size = std::fs::metadata(&path).map_err(io)?.len();
+    if size > MAX_READ_BYTES {
+        return Err(StoreError::TooLarge {
+            path,
+            size,
+            max: MAX_READ_BYTES,
+        });
+    }
+    std::fs::read(&path).map_err(io)
+}
+
+/// Accès en **lecture seule** au dossier du mod (`MOD_ROOT`). Ce type n'a aucune méthode qui
+/// écrive, renomme ou supprime : la lecture seule est garantie par construction.
+#[derive(Debug, Clone)]
+pub struct ModReader {
+    sandbox: Sandbox,
+}
+
+impl ModReader {
+    /// `MOD_ROOT` doit être un dossier existant. Rien n'est créé.
+    pub fn open(mod_root: &Path) -> Result<ModReader, StoreError> {
+        let sandbox = Sandbox::new(mod_root).map_err(|e| StoreError::ModRootUnusable {
+            mod_root: mod_root.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+        Ok(ModReader { sandbox })
+    }
+
+    pub fn root(&self) -> &Path {
+        self.sandbox.root()
+    }
+
+    /// Liste les fichiers du mod (ou d'un sous-dossier), sans `.backup` ni temporaires.
+    pub fn list_files(&self, subfolder: Option<&str>) -> Result<Listing, StoreError> {
+        Ok(list_files(&self.sandbox, subfolder)?)
+    }
+
+    /// Lit un fichier du mod (taille limitée à `MAX_READ_BYTES`).
+    pub fn read_file(&self, rel: &str) -> Result<Vec<u8>, StoreError> {
+        read_capped(&self.sandbox, rel)
+    }
 }
 
 /// Horodatage UTC pour les noms de sauvegarde : `YYYYMMDDTHHMMSS.mmmZ` (sans `:`, valide
@@ -611,6 +672,50 @@ mod tests {
             Err(StoreError::ModReadOnly { .. })
         ));
         assert!(s.guard_write(s.csv_root()).is_ok());
+    }
+
+    #[test]
+    fn mod_reader_lists_and_reads_the_mod_without_any_write_api() {
+        let e = env();
+        let r = ModReader::open(&e.mod_root).unwrap();
+        let l = r.list_files(None).unwrap();
+        let paths: Vec<_> = l.entries.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["modinfo.json"]);
+        assert_eq!(r.read_file("modinfo.json").unwrap(), b"{}");
+        assert!(matches!(
+            r.read_file("../x"),
+            Err(StoreError::Sandbox(SandboxError::InvalidPath { .. }))
+        ));
+        assert!(matches!(
+            ModReader::open(&e.mod_root.join("absent")),
+            Err(StoreError::ModRootUnusable { .. })
+        ));
+    }
+
+    #[test]
+    fn store_listing_hides_backups_and_temporaries() {
+        let e = env();
+        let s = open(&e);
+        s.write_csv("a.csv", b"---,A\n1,\"1\"\n", WriteOptions::default())
+            .unwrap();
+        s.write_csv("a.csv", b"---,A\n1,\"2\"\n", confirmed())
+            .unwrap();
+        fs::write(s.csv_root().join(".a.csv.tmp-1-2"), "x").unwrap();
+        let l = s.list_files(None).unwrap();
+        let paths: Vec<_> = l.entries.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["a.csv"]);
+    }
+
+    #[test]
+    fn oversized_files_are_not_read() {
+        let e = env();
+        let s = open(&e);
+        let big = fs::File::create(s.csv_root().join("big.csv")).unwrap();
+        big.set_len(MAX_READ_BYTES + 1).unwrap();
+        assert!(matches!(
+            s.read_csv("big.csv"),
+            Err(StoreError::TooLarge { .. })
+        ));
     }
 
     #[test]
