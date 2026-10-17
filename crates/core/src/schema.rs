@@ -558,6 +558,16 @@ type = "raw"
     }
 
     #[test]
+    fn example_schema_parses_and_covers_every_type() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../schemas/exemple.toml");
+        let s = Schema::from_file(Path::new(path)).unwrap();
+        let used: std::collections::BTreeSet<_> =
+            s.fields.iter().map(|f| f.ty.type_name()).collect();
+        let known: std::collections::BTreeSet<_> = KNOWN_TYPES.iter().copied().collect();
+        assert_eq!(used, known);
+    }
+
+    #[test]
     fn from_file_reports_missing_file() {
         let e = Schema::from_file(Path::new("/nonexistent/x.toml")).unwrap_err();
         assert!(matches!(e, SchemaError::Io { .. }));

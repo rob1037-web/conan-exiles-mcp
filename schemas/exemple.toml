@@ -1,0 +1,59 @@
+# Schéma d'exemple : illustre le contrat du format, avec chaque type au moins une fois.
+# Les noms de champs ci-dessous sont fictifs et ne décrivent aucune DataTable réelle du Devkit.
+#
+# Règles générales :
+#   - Toute clé inconnue, tout type inconnu ou toute contrainte mal placée est une erreur.
+#   - L'ordre des [[fields]] est conservé.
+#   - Les noms de champs sont uniques, sans tenir compte de la casse (comme les FName Unreal).
+#   - La colonne clé de ligne (Name) est implicite : elle ne se déclare pas ici.
+#     L'en-tête exact de cette colonne dans le CSV sera déterminé à partir du fixture.
+
+# Nom du schéma (obligatoire, non vide).
+name = "exemple"
+# Description (optionnelle).
+description = "Schéma d'exemple couvrant tous les types"
+
+# --- string : texte. Contraintes optionnelles : min_len, max_len (entiers >= 0).
+[[fields]]
+name = "Label"
+type = "string"
+required = true            # défaut : false
+min_len = 1
+max_len = 64
+description = "Texte libre borné en longueur"
+
+# --- int : entier signé 64 bits. Contraintes optionnelles : min, max (entiers).
+[[fields]]
+name = "Quantity"
+type = "int"
+min = 0
+max = 1000
+
+# --- float : nombre à virgule. Contraintes optionnelles : min, max (un entier TOML est accepté).
+[[fields]]
+name = "Ratio"
+type = "float"
+min = 0
+max = 2.5
+
+# --- bool : booléen. Aucune contrainte.
+[[fields]]
+name = "Enabled"
+type = "bool"
+
+# --- enum : une valeur parmi une liste. 'values' obligatoire, non vide, sans doublon.
+[[fields]]
+name = "Category"
+type = "enum"
+values = ["Alpha", "Beta", "Gamma"]
+
+# --- asset_ref : référence vers un asset du jeu. Aucune contrainte pour l'instant.
+[[fields]]
+name = "Icon"
+type = "asset_ref"
+
+# --- raw : conservé tel quel, sans validation, réécrit à l'identique.
+# À utiliser pour les colonnes que le serveur ne sait pas encore typer (tableaux, structs, FText...).
+[[fields]]
+name = "Extra"
+type = "raw"
