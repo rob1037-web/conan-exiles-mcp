@@ -45,13 +45,21 @@ pub fn validate_row(schema: &Schema, row: &RawRow) -> Result<Row, Vec<Validation
     };
 
     if row.key.trim().is_empty() {
-        errors.push(err(None, Some(&row.key), "une clé de ligne non vide".into()));
+        errors.push(err(
+            None,
+            Some(&row.key),
+            "une clé de ligne non vide".into(),
+        ));
     }
 
     // Colonnes inconnues et doublons.
     for (i, (col, raw)) in row.cells.iter().enumerate() {
         if row.cells[..i].iter().any(|(c, _)| c == col) {
-            errors.push(err(Some(col), Some(raw), "une seule cellule par colonne".into()));
+            errors.push(err(
+                Some(col),
+                Some(raw),
+                "une seule cellule par colonne".into(),
+            ));
         }
         if schema.field(col).is_none() {
             let hint = schema
@@ -64,7 +72,11 @@ pub fn validate_row(schema: &Schema, row: &RawRow) -> Result<Row, Vec<Validation
             errors.push(err(
                 Some(col),
                 Some(raw),
-                format!("une colonne du schéma '{}': {}{hint}", schema.name, known.join(", ")),
+                format!(
+                    "une colonne du schéma '{}': {}{hint}",
+                    schema.name,
+                    known.join(", ")
+                ),
             ));
         }
     }
@@ -72,7 +84,9 @@ pub fn validate_row(schema: &Schema, row: &RawRow) -> Result<Row, Vec<Validation
     // Champs du schéma.
     let mut cells = Vec::with_capacity(row.cells.len());
     for (col, raw) in &row.cells {
-        let Some(field) = schema.field(col) else { continue };
+        let Some(field) = schema.field(col) else {
+            continue;
+        };
         match check_cell(field, raw) {
             Ok(value) => cells.push(Cell {
                 column: col.clone(),
@@ -107,7 +121,10 @@ pub fn validate_row(schema: &Schema, row: &RawRow) -> Result<Row, Vec<Validation
 fn check_cell(field: &Field, raw: &str) -> Result<Value, String> {
     if raw.is_empty() {
         return if field.required {
-            Err(format!("une valeur non vide ({}, requis)", describe_type(&field.ty)))
+            Err(format!(
+                "une valeur non vide ({}, requis)",
+                describe_type(&field.ty)
+            ))
         } else {
             Ok(Value::Empty)
         };
@@ -224,7 +241,10 @@ type = "raw"
         RawRow {
             line: 7,
             key: "Row_1".into(),
-            cells: cells.iter().map(|(c, v)| ((*c).into(), (*v).into())).collect(),
+            cells: cells
+                .iter()
+                .map(|(c, v)| ((*c).into(), (*v).into()))
+                .collect(),
         }
     }
 
@@ -248,11 +268,17 @@ type = "raw"
         )
         .unwrap();
         let cols: Vec<_> = r.cells.iter().map(|c| c.column.as_str()).collect();
-        assert_eq!(cols, ["Qty", "Label", "Ratio", "On", "Cat", "Icon", "Extra"]);
+        assert_eq!(
+            cols,
+            ["Qty", "Label", "Ratio", "On", "Cat", "Icon", "Extra"]
+        );
         let qty = r.cell("Qty").unwrap();
         assert_eq!((qty.raw.as_str(), &qty.value), ("007", &Value::Int(7)));
         let ratio = r.cell("Ratio").unwrap();
-        assert_eq!((ratio.raw.as_str(), &ratio.value), ("0.50", &Value::Float(0.5)));
+        assert_eq!(
+            (ratio.raw.as_str(), &ratio.value),
+            ("0.50", &Value::Float(0.5))
+        );
         let on = r.cell("On").unwrap();
         assert_eq!((on.raw.as_str(), &on.value), ("TRUE", &Value::Bool(true)));
         assert_eq!(r.cell("Extra").unwrap().value, Value::Raw);

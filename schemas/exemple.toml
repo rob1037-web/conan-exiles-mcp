@@ -4,6 +4,9 @@
 # Règles générales :
 #   - Toute clé inconnue, tout type inconnu ou toute contrainte mal placée est une erreur.
 #   - L'ordre des [[fields]] est conservé.
+#   - Toutes les colonnes du schéma doivent figurer dans l'en-tête du CSV, requises ou non :
+#     le Devkit exporte tous les champs de la struct, une absence signifie que le schéma ne
+#     correspond pas à l'export. `required` ne concerne que les cellules vides.
 #   - Les noms de champs sont uniques, sans tenir compte de la casse (comme les FName Unreal).
 #   - La colonne clé de ligne (la première du CSV) est implicite : elle ne se déclare pas ici.
 #     Son en-tête (`---` dans les exports Devkit observés) est conservé tel quel, sans être supposé.
@@ -17,7 +20,7 @@ description = "Schéma d'exemple couvrant tous les types"
 [[fields]]
 name = "Label"
 type = "string"
-required = true            # défaut : false
+required = true            # défaut : false ; porte sur les cellules vides (une cellule vide est refusée)
 min_len = 1
 max_len = 64
 description = "Texte libre borné en longueur"

@@ -9,7 +9,7 @@
 //! [[fields]]
 //! name = "Damage"
 //! type = "int"                     # string | int | float | bool | enum | asset_ref | raw
-//! required = true                  # défaut : false
+//! required = true                  # défaut : false ; cellule vide refusée si true
 //! min = 0                          # int / float
 //! max = 1000
 //! ```
@@ -245,14 +245,21 @@ fn convert_type(rf: &RawField) -> Result<FieldType, SchemaError> {
             Ok(FieldType::Float { min, max })
         }
         "bool" => {
-            reject(rf, "bool", &["min", "max", "min_len", "max_len", "values"], "aucune")?;
+            reject(
+                rf,
+                "bool",
+                &["min", "max", "min_len", "max_len", "values"],
+                "aucune",
+            )?;
             Ok(FieldType::Bool)
         }
         "enum" => {
             reject(rf, "enum", &["min", "max", "min_len", "max_len"], "values")?;
             let values = rf.values.clone().unwrap_or_default();
             if values.is_empty() {
-                return Err(SchemaError::EnumWithoutValues { field: f.to_owned() });
+                return Err(SchemaError::EnumWithoutValues {
+                    field: f.to_owned(),
+                });
             }
             for (i, v) in values.iter().enumerate() {
                 if values[..i].contains(v) {
@@ -265,11 +272,21 @@ fn convert_type(rf: &RawField) -> Result<FieldType, SchemaError> {
             Ok(FieldType::Enum { values })
         }
         "asset_ref" => {
-            reject(rf, "asset_ref", &["min", "max", "min_len", "max_len", "values"], "aucune")?;
+            reject(
+                rf,
+                "asset_ref",
+                &["min", "max", "min_len", "max_len", "values"],
+                "aucune",
+            )?;
             Ok(FieldType::AssetRef)
         }
         "raw" => {
-            reject(rf, "raw", &["min", "max", "min_len", "max_len", "values"], "aucune")?;
+            reject(
+                rf,
+                "raw",
+                &["min", "max", "min_len", "max_len", "values"],
+                "aucune",
+            )?;
             Ok(FieldType::Raw)
         }
         other => Err(SchemaError::UnknownType {
@@ -440,11 +457,17 @@ type = "raw"
         assert!(!s.field("Damage").unwrap().required);
         assert_eq!(
             s.field("Damage").unwrap().ty,
-            FieldType::Int { min: Some(0), max: Some(100) }
+            FieldType::Int {
+                min: Some(0),
+                max: Some(100)
+            }
         );
         assert_eq!(
             s.field("Weight").unwrap().ty,
-            FieldType::Float { min: Some(0.0), max: Some(2.5) }
+            FieldType::Float {
+                min: Some(0.0),
+                max: Some(2.5)
+            }
         );
         assert_eq!(s.field("Extra").unwrap().ty, FieldType::Raw);
         assert_eq!(s.field("Extra").unwrap().ty.type_name(), "raw");
@@ -452,10 +475,9 @@ type = "raw"
 
     #[test]
     fn field_order_is_preserved() {
-        let s = parse(
-            "name='t'\n[[fields]]\nname='B'\ntype='raw'\n[[fields]]\nname='A'\ntype='raw'\n",
-        )
-        .unwrap();
+        let s =
+            parse("name='t'\n[[fields]]\nname='B'\ntype='raw'\n[[fields]]\nname='A'\ntype='raw'\n")
+                .unwrap();
         let names: Vec<_> = s.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["B", "A"]);
     }
@@ -488,11 +510,20 @@ type = "raw"
     #[test]
     fn constraint_on_wrong_type_is_an_error() {
         let e = one_field("type = \"bool\"\nmin = 1").unwrap_err();
-        assert!(matches!(e, SchemaError::KeyNotApplicable { key: "min", .. }));
+        assert!(matches!(
+            e,
+            SchemaError::KeyNotApplicable { key: "min", .. }
+        ));
         let e = one_field("type = \"int\"\nmin_len = 1").unwrap_err();
-        assert!(matches!(e, SchemaError::KeyNotApplicable { key: "min_len", .. }));
+        assert!(matches!(
+            e,
+            SchemaError::KeyNotApplicable { key: "min_len", .. }
+        ));
         let e = one_field("type = \"raw\"\nvalues = [\"a\"]").unwrap_err();
-        assert!(matches!(e, SchemaError::KeyNotApplicable { key: "values", .. }));
+        assert!(matches!(
+            e,
+            SchemaError::KeyNotApplicable { key: "values", .. }
+        ));
     }
 
     #[test]
@@ -531,10 +562,9 @@ type = "raw"
 
     #[test]
     fn duplicate_fields_rejected() {
-        let e = parse(
-            "name='t'\n[[fields]]\nname='A'\ntype='raw'\n[[fields]]\nname='a'\ntype='raw'\n",
-        )
-        .unwrap_err();
+        let e =
+            parse("name='t'\n[[fields]]\nname='A'\ntype='raw'\n[[fields]]\nname='a'\ntype='raw'\n")
+                .unwrap_err();
         assert!(matches!(e, SchemaError::DuplicateField { .. }));
     }
 
@@ -560,11 +590,17 @@ type = "raw"
 
     #[test]
     fn lightning_rod_loot_schema_parses() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../schemas/lightning_rod_loot.toml");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/lightning_rod_loot.toml"
+        );
         let s = Schema::from_file(Path::new(path)).unwrap();
         let cols: Vec<_> = s.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(cols, ["ItemTemplateID", "MinAmount", "MaxAmount"]);
-        assert!(s.fields.iter().all(|f| f.required && f.ty.type_name() == "int"));
+        assert!(s
+            .fields
+            .iter()
+            .all(|f| f.required && f.ty.type_name() == "int"));
     }
 
     #[test]

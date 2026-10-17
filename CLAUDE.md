@@ -57,7 +57,7 @@ fixtures/      # exports réels du Devkit pour les tests
 - [ ] Workspace Cargo avec les 2 crates
 - [ ] Parser de schéma TOML (string, int, float, bool, enum, référence d'asset, champ requis/optionnel, bornes)
 - [ ] Validation d'une ligne, avec messages d'erreur précis
-- [ ] Lecture/écriture CSV au format exact des DataTables Unreal (colonne `Name` en tête)
+- [ ] Lecture/écriture CSV au format exact des DataTables Unreal (la première colonne est la clé de ligne ; son en-tête est lu dans le fichier, `---` dans les exports observés, jamais supposé)
 - [ ] Test de round-trip : relire le fixture, le réécrire, obtenir un résultat identique à l'octet près
 - [ ] Sandbox de chemins + tests d'évasion (`..`, absolu, symlink)
 

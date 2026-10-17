@@ -131,7 +131,102 @@ impl Table {
     }
 }
 
-/// Valide toute la table : l'en-tête d'abord (colonnes inconnues, colonnes requises
+/// Erreur d'ajout de ligne.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WriteError {
+    #[error("ligne '{key}': colonne '{column}' absente de l'en-tête (colonnes: {header})")]
+    UnknownColumn {
+        key: String,
+        column: String,
+        header: String,
+    },
+}
+
+impl Table {
+    /// Sérialise la table en mémoire, sans aucun accès disque. Chaque cellule est
+    /// réécrite avec son quoting d'origine ; une cellule non quotée dont le texte
+    /// exigerait des guillemets (cas impossible après `parse`) est quotée d'office.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let nl = self.newline.as_str();
+        let mut out = String::new();
+        if self.bom {
+            out.push(BOM);
+        }
+        let mut records = std::iter::once(&self.header).chain(&self.rows).peekable();
+        while let Some(rec) = records.next() {
+            for (i, cell) in rec.cells.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_cell(&mut out, cell);
+            }
+            if records.peek().is_some() || self.final_newline {
+                out.push_str(nl);
+            }
+        }
+        out.into_bytes()
+    }
+
+    /// Ajoute une ligne validée. Convention des nouvelles lignes, observée dans les
+    /// exports Devkit : clé non quotée, valeurs quotées. Les colonnes de l'en-tête
+    /// absentes de la ligne reçoivent une cellule vide quotée (`""`). Une colonne qui
+    /// n'existe pas dans l'en-tête est refusée.
+    pub fn push_row(&mut self, row: &Row) -> Result<(), WriteError> {
+        let columns = &self.header.cells[1..];
+        if let Some(bad) = row
+            .cells
+            .iter()
+            .find(|c| !columns.iter().any(|h| h.text == c.column))
+        {
+            return Err(WriteError::UnknownColumn {
+                key: row.key.clone(),
+                column: bad.column.clone(),
+                header: columns
+                    .iter()
+                    .map(|c| c.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            });
+        }
+        let mut cells = Vec::with_capacity(self.header.cells.len());
+        cells.push(CsvCell {
+            text: row.key.clone(),
+            quoted: false,
+        });
+        for h in columns {
+            let text = row
+                .cells
+                .iter()
+                .find(|c| c.column == h.text)
+                .map(|c| c.raw.clone())
+                .unwrap_or_default();
+            cells.push(CsvCell { text, quoted: true });
+        }
+        let last = self.rows.last().unwrap_or(&self.header);
+        let line = last.line
+            + 1
+            + last
+                .cells
+                .iter()
+                .map(|c| c.text.matches('\n').count())
+                .sum::<usize>();
+        self.rows.push(CsvRecord { line, cells });
+        Ok(())
+    }
+}
+
+fn write_cell(out: &mut String, cell: &CsvCell) {
+    let needs_quotes = cell.text.contains([',', '"', '\n', '\r']);
+    if cell.quoted || needs_quotes {
+        out.push('"');
+        out.push_str(&cell.text.replace('"', "\"\""));
+        out.push('"');
+    } else {
+        out.push_str(&cell.text);
+    }
+}
+
+/// Valide toute la table : l'en-tête d'abord (colonnes inconnues, colonnes du schéma
 /// absentes), puis chaque ligne. Renvoie toutes les erreurs trouvées.
 pub fn validate_table(schema: &Schema, table: &Table) -> Result<Vec<Row>, Vec<ValidationError>> {
     let mut errors = Vec::new();
@@ -156,13 +251,15 @@ pub fn validate_table(schema: &Schema, table: &Table) -> Result<Vec<Row>, Vec<Va
             });
         }
     }
-    for field in schema.fields.iter().filter(|f| f.required) {
+    // Le Devkit exporte tous les champs de la struct : une colonne du schéma absente de
+    // l'en-tête (requise ou non) signifie que le schéma ne correspond pas à l'export.
+    for field in &schema.fields {
         if !columns.iter().any(|c| c.text == field.name) {
             errors.push(ValidationError {
                 line,
                 column: Some(field.name.clone()),
                 received: None,
-                expected: "cette colonne dans l'en-tête (champ requis)".into(),
+                expected: "cette colonne dans l'en-tête (le Devkit exporte tous les champs: le schéma ne correspond pas à ce fichier)".into(),
             });
         }
     }
@@ -367,14 +464,20 @@ mod tests {
         assert!(!t.bom);
         assert_eq!(t.newline, Newline::Lf);
         assert!(t.final_newline);
-        assert_eq!(texts(&t.header), ["---", "ItemTemplateID", "MinAmount", "MaxAmount"]);
+        assert_eq!(
+            texts(&t.header),
+            ["---", "ItemTemplateID", "MinAmount", "MaxAmount"]
+        );
         assert!(t.header.cells.iter().all(|c| !c.quoted));
         assert_eq!(t.rows.len(), 4);
         assert_eq!(texts(&t.rows[0]), ["1", "11011", "5", "15"]);
         assert_eq!(texts(&t.rows[3]), ["4", "10005", "5", "15"]);
         for r in &t.rows {
             assert!(!r.cells[0].quoted, "la clé n'est pas quotée");
-            assert!(r.cells[1..].iter().all(|c| c.quoted), "les valeurs sont quotées");
+            assert!(
+                r.cells[1..].iter().all(|c| c.quoted),
+                "les valeurs sont quotées"
+            );
         }
         assert_eq!(t.rows[0].line, 2);
         assert_eq!(t.rows[3].line, 5);
@@ -396,11 +499,23 @@ mod tests {
     }
 
     #[test]
-    fn header_errors_are_reported_once() {
+    fn optional_column_missing_from_header_is_an_error_too() {
         let schema = Schema::from_toml_str(
-            "name='t'\n[[fields]]\nname='A'\ntype='int'\nrequired=true\n",
+            "name='t'\n[[fields]]\nname='A'\ntype='int'\n[[fields]]\nname='B'\ntype='int'\n",
         )
         .unwrap();
+        let t = parse("---,A\n1,2\n").unwrap();
+        let e = validate_table(&schema, &t).unwrap_err();
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0].column.as_deref(), Some("B"));
+        assert_eq!(e[0].received, None);
+    }
+
+    #[test]
+    fn header_errors_are_reported_once() {
+        let schema =
+            Schema::from_toml_str("name='t'\n[[fields]]\nname='A'\ntype='int'\nrequired=true\n")
+                .unwrap();
         let t = parse("---,B\n1,2\n2,3\n").unwrap();
         let e = validate_table(&schema, &t).unwrap_err();
         assert_eq!(e.len(), 2); // B inconnue, A absente
@@ -470,11 +585,17 @@ mod tests {
         let t = parse("---,A,B\n1,\"\",\n").unwrap();
         assert_eq!(
             t.rows[0].cells[1],
-            CsvCell { text: String::new(), quoted: true }
+            CsvCell {
+                text: String::new(),
+                quoted: true
+            }
         );
         assert_eq!(
             t.rows[0].cells[2],
-            CsvCell { text: String::new(), quoted: false }
+            CsvCell {
+                text: String::new(),
+                quoted: false
+            }
         );
     }
 
@@ -511,16 +632,168 @@ mod tests {
         ));
         assert!(matches!(
             parse("---,A\n1,\"a\"b\n").unwrap_err(),
-            CsvError::TextAfterQuote { line: 2, found: 'b' }
+            CsvError::TextAfterQuote {
+                line: 2,
+                found: 'b'
+            }
         ));
         assert!(matches!(
             parse("---,A,B\n1,2\n").unwrap_err(),
-            CsvError::WrongColumnCount { line: 2, expected: 3, found: 2 }
+            CsvError::WrongColumnCount {
+                line: 2,
+                expected: 3,
+                found: 2
+            }
         ));
         // ligne vide au milieu : une seule cellule vide, donc mauvais nombre de colonnes
         assert!(matches!(
             parse("---,A\n\n1,2\n").unwrap_err(),
             CsvError::WrongColumnCount { line: 2, .. }
         ));
+    }
+
+    // --- Écriture -----------------------------------------------------------------
+
+    #[test]
+    fn fixture_round_trips_byte_for_byte() {
+        let original = fixture();
+        let t = Table::parse(&original).unwrap();
+        assert_eq!(t.to_bytes(), original);
+    }
+
+    #[test]
+    fn edge_cases_round_trip_byte_for_byte() {
+        // Cas limites selon la norme CSV : non validé sur un export Devkit réel
+        let cases: &[&[u8]] = &[
+            b"---,A\r\n1,\"x\"\r\n",
+            b"\xef\xbb\xbf---,A\n1,\"x\"\n",
+            b"---,A\n1,\"a \"\"b\"\", c\"\n",
+            b"---,A\n1,\"x\ny\"\n",
+            b"---,A,B\n1,\"\",\n",
+            b"---,A\n1,\"\xc3\xa9p\xc3\xa9e\"",
+            b"\"---\",\"A\"\n\"1\",2\n",
+            b"---,A\n",
+            b"---",
+        ];
+        for case in cases {
+            let t = Table::parse(case).unwrap();
+            assert_eq!(t.to_bytes(), *case, "{:?}", String::from_utf8_lossy(case));
+        }
+    }
+
+    fn lightning_schema() -> Schema {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/lightning_rod_loot.toml"
+        );
+        Schema::from_file(Path::new(path)).unwrap()
+    }
+
+    #[test]
+    fn new_row_follows_observed_convention_and_rereads_valid() {
+        let schema = lightning_schema();
+        let original = fixture();
+        let mut t = Table::parse(&original).unwrap();
+        let raw = RawRow {
+            line: 0,
+            key: "5".into(),
+            cells: vec![
+                ("ItemTemplateID".into(), "12000".into()),
+                ("MinAmount".into(), "1".into()),
+                ("MaxAmount".into(), "3".into()),
+            ],
+        };
+        let row = validate_row(&schema, &raw).unwrap();
+        t.push_row(&row).unwrap();
+
+        let mut expected = original.clone();
+        expected.extend_from_slice(b"5,\"12000\",\"1\",\"3\"\n");
+        let bytes = t.to_bytes();
+        assert_eq!(bytes, expected);
+
+        let again = Table::parse(&bytes).unwrap();
+        assert_eq!(again.rows.len(), 5);
+        assert_eq!(again.rows[4].line, 6);
+        assert!(!again.rows[4].cells[0].quoted);
+        assert!(again.rows[4].cells[1..].iter().all(|c| c.quoted));
+        assert_eq!(validate_table(&schema, &again).unwrap().len(), 5);
+        // les lignes d'origine sont intactes
+        assert!(bytes.starts_with(&original));
+    }
+
+    #[test]
+    fn pushed_row_keeps_raw_text_and_fills_missing_columns() {
+        let schema = Schema::from_toml_str(
+            "name='t'\n[[fields]]\nname='A'\ntype='float'\n[[fields]]\nname='B'\ntype='int'\n",
+        )
+        .unwrap();
+        let mut t = parse("---,A,B\n").unwrap();
+        let row = validate_row(
+            &schema,
+            &RawRow {
+                line: 0,
+                key: "k".into(),
+                cells: vec![("A".into(), "1.50".into())],
+            },
+        )
+        .unwrap();
+        t.push_row(&row).unwrap();
+        assert_eq!(t.to_bytes(), b"---,A,B\nk,\"1.50\",\"\"\n");
+    }
+
+    #[test]
+    fn push_row_rejects_unknown_column() {
+        let schema = Schema::from_toml_str("name='t'\n[[fields]]\nname='Z'\ntype='int'\n").unwrap();
+        let mut t = parse("---,A\n").unwrap();
+        let row = validate_row(
+            &schema,
+            &RawRow {
+                line: 0,
+                key: "k".into(),
+                cells: vec![("Z".into(), "1".into())],
+            },
+        )
+        .unwrap();
+        let e = t.push_row(&row).unwrap_err();
+        assert!(matches!(e, WriteError::UnknownColumn { ref column, .. } if column == "Z"));
+        assert!(e.to_string().contains("colonnes: A"));
+        assert!(t.rows.is_empty());
+    }
+
+    #[test]
+    fn programmatic_cells_are_quoted_when_required() {
+        let mut t = parse("---,A\n").unwrap();
+        t.rows.push(CsvRecord {
+            line: 2,
+            cells: vec![
+                CsvCell {
+                    text: "a,b".into(),
+                    quoted: false,
+                },
+                CsvCell {
+                    text: "q\"".into(),
+                    quoted: true,
+                },
+            ],
+        });
+        assert_eq!(t.to_bytes(), b"---,A\n\"a,b\",\"q\"\"\"\n");
+        assert!(Table::parse(&t.to_bytes()).is_ok());
+    }
+
+    #[test]
+    fn push_row_after_file_without_final_newline() {
+        let schema = Schema::from_toml_str("name='t'\n[[fields]]\nname='A'\ntype='int'\n").unwrap();
+        let mut t = parse("---,A\n1,\"2\"").unwrap();
+        let row = validate_row(
+            &schema,
+            &RawRow {
+                line: 0,
+                key: "2".into(),
+                cells: vec![("A".into(), "3".into())],
+            },
+        )
+        .unwrap();
+        t.push_row(&row).unwrap();
+        assert_eq!(t.to_bytes(), b"---,A\n1,\"2\"\n2,\"3\"");
     }
 }
