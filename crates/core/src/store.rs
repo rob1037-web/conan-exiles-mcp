@@ -434,4 +434,160 @@ mod tests {
         assert_eq!(tree(&e2.mod_root), before2);
         assert_eq!(tree(&e.mod_root), before);
     }
+
+    /// Tests sur le vrai disque de la machine de développement : MOD_ROOT réel (lecture
+    /// seule, jamais écrit) et CSV_ROOT par défaut `D:\ConanMod\csv`. Ignorés (ligne
+    /// `SKIPPED`) si le dossier du mod n'existe pas sur la machine.
+    #[cfg(windows)]
+    mod real {
+        use super::*;
+        use crate::csv::Table;
+        use std::time::SystemTime;
+
+        const REAL_MOD_ROOT: &str = r"D:\Program Files\CEUE5Devkit\UE4\Content\Mods\test";
+        const FIXTURE: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/DT_LightningRodLoot_Common.csv"
+        ));
+
+        /// Contenu, taille et date de modification des fichiers du mod à surveiller.
+        type Snapshot = Vec<(&'static str, Vec<u8>, u64, SystemTime)>;
+
+        fn snapshot() -> Snapshot {
+            ["modinfo.json", "active.txt"]
+                .into_iter()
+                .map(|name| {
+                    let p = Path::new(REAL_MOD_ROOT).join(name);
+                    let meta = fs::metadata(&p).unwrap();
+                    (
+                        name,
+                        fs::read(&p).unwrap(),
+                        meta.len(),
+                        meta.modified().unwrap(),
+                    )
+                })
+                .collect()
+        }
+
+        fn available(test: &str) -> bool {
+            if Path::new(REAL_MOD_ROOT).join("modinfo.json").is_file() {
+                return true;
+            }
+            eprintln!("SKIPPED {test}: dossier du mod absent sur cette machine ({REAL_MOD_ROOT})");
+            false
+        }
+
+        /// Supprime le fichier de test même si une assertion échoue.
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+
+        fn unique_name() -> String {
+            let nanos = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            format!("_conan_core_test_{}_{nanos}.csv", std::process::id())
+        }
+
+        fn round_trip_on_default_csv_root() {
+            let store = CsvStore::open(&Config::new(REAL_MOD_ROOT, None)).unwrap(); // crée D:\ConanMod\csv
+            assert!(store.csv_root().is_dir());
+            assert!(
+                store
+                    .csv_root()
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .ends_with(r"conanmod\csv"),
+                "{:?}",
+                store.csv_root()
+            );
+            let name = unique_name();
+            let rel = name.clone();
+            let expected = store.csv_root().join(&name);
+            let _cleanup = Cleanup(expected.clone());
+
+            // création + écriture
+            let written = store.write_csv(&rel, FIXTURE).unwrap();
+            assert_eq!(written, expected);
+            assert!(written.is_file());
+            assert!(store.guard_write(&written).is_ok());
+            // relecture : octets identiques, et round-trip du parseur
+            let back = store.read_csv(&rel).unwrap();
+            assert_eq!(back, FIXTURE);
+            assert_eq!(Table::parse(&back).unwrap().to_bytes(), FIXTURE);
+            // pas d'écrasement
+            assert!(matches!(
+                store.write_csv(&rel, b"autre"),
+                Err(StoreError::AlreadyExists { .. })
+            ));
+            // suppression du fichier de test uniquement
+            fs::remove_file(&written).unwrap();
+            assert!(!written.exists());
+        }
+
+        fn refusals_under_the_real_mod_root() {
+            let mod_root = Path::new(REAL_MOD_ROOT);
+            // CSV_ROOT = le mod lui-même ou un dossier existant du mod : refusé à l'ouverture
+            // (les dossiers existent déjà, donc même un défaut de contrôle ne créerait rien).
+            for csv_root in [mod_root.to_path_buf(), mod_root.join("Content")] {
+                let err = CsvStore::open(&Config::new(REAL_MOD_ROOT, Some(csv_root.clone())))
+                    .unwrap_err();
+                assert!(
+                    matches!(err, StoreError::CsvRootInsideMod { .. }),
+                    "{csv_root:?}: {err}"
+                );
+            }
+            // garde-fou sur des chemins déjà résolus (aucune écriture n'est tentée)
+            let store = CsvStore::open(&Config::new(REAL_MOD_ROOT, None)).unwrap();
+            let canonical = mod_root.canonicalize().unwrap();
+            for p in [
+                canonical.clone(),
+                canonical.join("modinfo.json"),
+                canonical.join("active.txt"),
+                canonical.join("Content").join("nouveau.csv"),
+            ] {
+                let err = store.guard_write(&p).unwrap_err();
+                assert!(matches!(err, StoreError::ModReadOnly { .. }), "{p:?}");
+                assert!(err.to_string().contains("lecture seule"));
+            }
+            // les sorties de CSV_ROOT vers le mod sont arrêtées par la sandbox
+            for rel in ["../test/x.csv", "..\\test\\x.csv", "D:/Program Files/x.csv"] {
+                assert!(
+                    matches!(store.write_csv(rel, b"x"), Err(StoreError::Sandbox(_))),
+                    "{rel}"
+                );
+            }
+        }
+
+        #[test]
+        fn real_csv_root_create_write_read_delete() {
+            if !available("real_csv_root_create_write_read_delete") {
+                return;
+            }
+            round_trip_on_default_csv_root();
+        }
+
+        #[test]
+        fn real_write_under_mod_root_is_refused() {
+            if !available("real_write_under_mod_root_is_refused") {
+                return;
+            }
+            refusals_under_the_real_mod_root();
+        }
+
+        #[test]
+        fn real_mod_files_are_never_modified() {
+            if !available("real_mod_files_are_never_modified") {
+                return;
+            }
+            let before = snapshot();
+            round_trip_on_default_csv_root();
+            refusals_under_the_real_mod_root();
+            assert_eq!(snapshot(), before, "modinfo.json ou active.txt a changé");
+        }
+    }
 }
