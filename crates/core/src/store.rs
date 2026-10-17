@@ -7,7 +7,9 @@
 //!   lien, jonction, casse différente) ; ce type n'a d'ailleurs aucune méthode qui
 //!   écrive, renomme ou supprime dans `MOD_ROOT` ;
 //! - `CSV_ROOT` est créé s'il n'existe pas, mais jamais s'il se trouve sous `MOD_ROOT` ;
-//! - un fichier existant n'est jamais écrasé (sauvegarde + confirmation : étape suivante).
+//! - un fichier existant n'est remplacé qu'avec `confirm`, après sauvegarde dans
+//!   `CSV_ROOT/.backup/` ; un dry-run renvoie le diff sans rien écrire ; l'écriture est
+//!   atomique (fichier temporaire puis renommage).
 //!
 //! Les limites de la sandbox (hardlink, TOCTOU) s'appliquent telles quelles.
 
@@ -16,6 +18,8 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::Config;
+use crate::csv::{CsvError, Table};
+use crate::diff::TableDiff;
 use crate::sandbox::{check_relative, Sandbox, SandboxError};
 
 /// Dossier des sauvegardes, sous `CSV_ROOT`. Jamais purgé automatiquement.
@@ -36,12 +40,16 @@ pub enum StoreError {
     },
     #[error("écriture refusée: {path:?} est sous MOD_ROOT {mod_root:?}, qui est en lecture seule. Les CSV s'écrivent uniquement sous CSV_ROOT")]
     ModReadOnly { path: PathBuf, mod_root: PathBuf },
-    #[error("écriture refusée: {path:?} existe déjà (aucun écrasement; la sauvegarde et la confirmation ne sont pas encore implémentées)")]
+    #[error("écriture refusée: {path:?} existe déjà; pour le remplacer (après sauvegarde dans .backup), confirmer explicitement avec confirm")]
     AlreadyExists { path: PathBuf },
     #[error(
         "chemin {path:?} refusé: le dossier {BACKUP_DIR} est réservé aux sauvegardes automatiques"
     )]
     ReservedPath { path: String },
+    #[error("contenu refusé, ce n'est pas un CSV valide: {source}")]
+    InvalidCsv { source: CsvError },
+    #[error("le fichier existant {path:?} n'est pas un CSV lisible ({source}): comparaison impossible, il n'est pas modifié")]
+    ExistingUnreadable { path: PathBuf, source: CsvError },
     #[error("sauvegarde impossible de {path:?} ({reason}): la modification n'a pas eu lieu")]
     BackupFailed { path: PathBuf, reason: String },
     #[error("erreur d'entrée/sortie sur {path:?}: {source}")]
@@ -188,10 +196,25 @@ impl CsvStore {
         std::fs::read(&path).map_err(|source| StoreError::Io { path, source })
     }
 
-    /// Écrit un nouveau CSV sous `CSV_ROOT` (dossiers intermédiaires créés au besoin).
-    /// Refuse un chemin qui se résout sous `MOD_ROOT` et un fichier déjà existant.
-    /// Renvoie le chemin réel écrit.
-    pub fn write_csv(&self, rel: &str, bytes: &[u8]) -> Result<PathBuf, StoreError> {
+    /// Écrit un CSV sous `CSV_ROOT` (dossiers intermédiaires créés au besoin, sauf en
+    /// dry-run). Le contenu doit être un CSV lisible par `Table::parse`.
+    ///
+    /// - **dry-run** : renvoie le diff sans rien écrire (ni fichier, ni dossier, ni
+    ///   sauvegarde), même si le fichier existe et sans `confirm`.
+    /// - **fichier nouveau** : écrit sans confirmation.
+    /// - **fichier existant** : sans `confirm`, `AlreadyExists`. Avec `confirm`, le fichier
+    ///   est d'abord sauvegardé dans `.backup/` (si la sauvegarde échoue, rien n'est
+    ///   modifié), puis remplacé. Un contenu identique à l'existant ne change rien (pas
+    ///   de sauvegarde, `unchanged: true`).
+    /// - l'écriture est atomique : fichier temporaire du même dossier, puis renommage.
+    ///
+    /// Refuse un chemin résolu sous `MOD_ROOT` et le dossier réservé `.backup`.
+    pub fn write_csv(
+        &self,
+        rel: &str,
+        bytes: &[u8],
+        options: WriteOptions,
+    ) -> Result<WriteOutcome, StoreError> {
         let comps = check_relative(rel)?;
         if comps[0].eq_ignore_ascii_case(BACKUP_DIR) {
             return Err(StoreError::ReservedPath {
@@ -210,36 +233,116 @@ impl CsvStore {
             Err(e) => return Err(e.into()),
         };
         self.guard_write(&target)?;
+
+        let new_table = Table::parse(bytes).map_err(|source| StoreError::InvalidCsv { source })?;
+        let existing = match std::fs::read(&target) {
+            Ok(b) => Some(b),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(source) => {
+                return Err(StoreError::Io {
+                    path: target,
+                    source,
+                })
+            }
+        };
+        let old_table = match &existing {
+            Some(b) => Some(
+                Table::parse(b).map_err(|source| StoreError::ExistingUnreadable {
+                    path: target.clone(),
+                    source,
+                })?,
+            ),
+            None => None,
+        };
+        let mut outcome = WriteOutcome {
+            path: target.clone(),
+            existed: existing.is_some(),
+            applied: false,
+            unchanged: existing.as_deref() == Some(bytes),
+            backup: None,
+            diff: TableDiff::between(old_table.as_ref(), &new_table),
+        };
+        if options.dry_run || outcome.unchanged {
+            return Ok(outcome);
+        }
+        if let Some(original) = &existing {
+            if !options.confirm {
+                return Err(StoreError::AlreadyExists { path: target });
+            }
+            // Sauvegarde d'abord : en cas d'échec, l'original n'est pas touché.
+            outcome.backup = Some(self.backup_bytes(rel, original)?);
+        }
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|source| StoreError::Io {
                 path: parent.to_path_buf(),
                 source,
             })?;
         }
-        let mut file = std::fs::OpenOptions::new()
+        write_atomic(&target, bytes)?;
+        outcome.applied = true;
+        Ok(outcome)
+    }
+}
+
+/// Options d'une écriture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteOptions {
+    /// Ne rien écrire, renvoyer seulement le diff.
+    pub dry_run: bool,
+    /// Autorise le remplacement d'un fichier existant (après sauvegarde).
+    pub confirm: bool,
+}
+
+/// Résultat d'une écriture (ou d'un dry-run).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteOutcome {
+    /// Chemin réel du fichier visé.
+    pub path: PathBuf,
+    /// Le fichier existait avant.
+    pub existed: bool,
+    /// Le fichier a été écrit.
+    pub applied: bool,
+    /// Le contenu est identique, au byte près, à l'existant : rien n'est fait.
+    pub unchanged: bool,
+    /// Sauvegarde créée avant le remplacement.
+    pub backup: Option<PathBuf>,
+    pub diff: TableDiff,
+}
+
+/// Écrit `bytes` dans un fichier temporaire du même dossier, puis le renomme sur `target` :
+/// jamais de fichier à moitié écrit. Le temporaire est supprimé si quelque chose échoue.
+/// (Un plantage du processus entre les deux peut laisser un `.<nom>.tmp-…` orphelin.)
+fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    let io = |source| StoreError::Io {
+        path: target.to_path_buf(),
+        source,
+    };
+    let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else {
+        return Err(io(std::io::Error::other("chemin sans dossier ou sans nom")));
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut tmp_name = OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".tmp-{}-{nanos}", std::process::id()));
+    let tmp = dir.join(tmp_name);
+    let result = (|| {
+        let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&target)
-            .map_err(|source| {
-                if source.kind() == std::io::ErrorKind::AlreadyExists {
-                    StoreError::AlreadyExists {
-                        path: target.clone(),
-                    }
-                } else {
-                    StoreError::Io {
-                        path: target.clone(),
-                        source,
-                    }
-                }
-            })?;
-        file.write_all(bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|source| StoreError::Io {
-                path: target.clone(),
-                source,
-            })?;
-        Ok(target)
+            .open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, target)
+    })();
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io(e));
     }
+    Ok(())
 }
 
 /// Horodatage UTC pour les noms de sauvegarde : `YYYYMMDDTHHMMSS.mmmZ` (sans `:`, valide
@@ -417,8 +520,13 @@ mod tests {
         let e = env();
         let s = open(&e);
         let path = s
-            .write_csv("datatables/DT_X.csv", b"---,A\n1,\"2\"\n")
-            .unwrap();
+            .write_csv(
+                "datatables/DT_X.csv",
+                b"---,A\n1,\"2\"\n",
+                WriteOptions::default(),
+            )
+            .unwrap()
+            .path;
         assert!(path.starts_with(s.csv_root()));
         assert_eq!(fs::read(&path).unwrap(), b"---,A\n1,\"2\"\n");
         assert_eq!(
@@ -431,8 +539,11 @@ mod tests {
     fn write_never_overwrites() {
         let e = env();
         let s = open(&e);
-        s.write_csv("a.csv", b"v1").unwrap();
-        let err = s.write_csv("a.csv", b"v2").unwrap_err();
+        s.write_csv("a.csv", b"v1", WriteOptions::default())
+            .unwrap();
+        let err = s
+            .write_csv("a.csv", b"v2", WriteOptions::default())
+            .unwrap_err();
         assert!(matches!(err, StoreError::AlreadyExists { .. }));
         assert_eq!(s.read_csv("a.csv").unwrap(), b"v1");
     }
@@ -449,7 +560,10 @@ mod tests {
             "NUL.csv",
         ] {
             assert!(
-                matches!(s.write_csv(rel, b"x"), Err(StoreError::Sandbox(_))),
+                matches!(
+                    s.write_csv(rel, b"x", WriteOptions::default()),
+                    Err(StoreError::Sandbox(_))
+                ),
                 "{rel}"
             );
         }
@@ -468,7 +582,7 @@ mod tests {
             "mod/Content/new.csv",
             "mod/nouveau/dossier/new.csv",
         ] {
-            let err = s.write_csv(rel, b"x").unwrap_err();
+            let err = s.write_csv(rel, b"x", WriteOptions::default()).unwrap_err();
             assert!(
                 matches!(err, StoreError::ModReadOnly { .. }),
                 "{rel}: {err}"
@@ -478,7 +592,9 @@ mod tests {
         assert!(!e.mod_root.join("nouveau").exists());
         assert_eq!(tree(&e.mod_root), before);
         // hors du mod, le même magasin écrit normalement
-        assert!(s.write_csv("autre/ok.csv", b"x").is_ok());
+        assert!(s
+            .write_csv("autre/ok.csv", b"x", WriteOptions::default())
+            .is_ok());
     }
 
     #[test]
@@ -511,8 +627,12 @@ mod tests {
     fn backup_is_an_identical_timestamped_copy_under_csv_root_backup_dir() {
         let e = env();
         let s = open(&e);
-        s.write_csv("datatables/DT_X.csv", b"---,A\n1,\"2\"\n")
-            .unwrap();
+        s.write_csv(
+            "datatables/DT_X.csv",
+            b"---,A\n1,\"2\"\n",
+            WriteOptions::default(),
+        )
+        .unwrap();
         let b = s.backup_csv("datatables/DT_X.csv").unwrap();
         assert!(b.starts_with(s.csv_root().join(BACKUP_DIR).join("datatables")));
         let name = b.file_name().unwrap().to_string_lossy().into_owned();
@@ -539,7 +659,8 @@ mod tests {
             s.backup_csv("absent.csv"),
             Err(StoreError::Sandbox(SandboxError::NotFound { .. }))
         ));
-        s.write_csv("README", b"---\n").unwrap();
+        s.write_csv("README", b"---\n", WriteOptions::default())
+            .unwrap();
         let b = s.backup_csv("README").unwrap();
         assert!(b
             .file_name()
@@ -555,7 +676,7 @@ mod tests {
         for rel in [".backup/x.csv", ".BACKUP/x.csv", ".backup/sub/x.csv"] {
             assert!(
                 matches!(
-                    s.write_csv(rel, b"---\n"),
+                    s.write_csv(rel, b"---\n", WriteOptions::default()),
                     Err(StoreError::ReservedPath { .. })
                 ),
                 "{rel}"
@@ -568,13 +689,340 @@ mod tests {
     fn backup_failure_is_reported_and_leaves_the_original_alone() {
         let e = env();
         let s = open(&e);
-        s.write_csv("a.csv", b"---,A\n1,\"1\"\n").unwrap();
+        s.write_csv("a.csv", b"---,A\n1,\"1\"\n", WriteOptions::default())
+            .unwrap();
         // `.backup` existe mais est un fichier: impossible d'y créer une sauvegarde
         fs::write(s.csv_root().join(BACKUP_DIR), "obstacle").unwrap();
         let err = s.backup_csv("a.csv").unwrap_err();
         assert!(matches!(err, StoreError::BackupFailed { .. }), "{err}");
         assert!(err.to_string().contains("n'a pas eu lieu"));
         assert_eq!(s.read_csv("a.csv").unwrap(), b"---,A\n1,\"1\"\n");
+    }
+
+    // --- Sauvegarde, dry-run, confirm, écriture atomique ---------------------------
+
+    const V1: &[u8] = b"---,A\n1,\"x\"\n2,\"y\"\n";
+    const V2: &[u8] = b"---,A\n1,\"x\"\n2,\"Y\"\n3,\"z\"\n";
+
+    fn confirmed() -> WriteOptions {
+        WriteOptions {
+            confirm: true,
+            ..WriteOptions::default()
+        }
+    }
+
+    fn dry(confirm: bool) -> WriteOptions {
+        WriteOptions {
+            dry_run: true,
+            confirm,
+        }
+    }
+
+    /// Fichiers ET dossiers sous `dir`, avec taille et date de modification.
+    fn listing(dir: &Path) -> Vec<(PathBuf, bool, u64, Option<std::time::SystemTime>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in fs::read_dir(d).unwrap() {
+                let p = e.unwrap().path();
+                let m = fs::metadata(&p).unwrap();
+                if m.is_dir() {
+                    stack.push(p.clone());
+                }
+                out.push((p, m.is_dir(), m.len(), m.modified().ok()));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn leftover_temp_files(dir: &Path) -> Vec<PathBuf> {
+        listing(dir)
+            .into_iter()
+            .map(|(p, ..)| p)
+            .filter(|p| p.to_string_lossy().contains(".tmp-"))
+            .collect()
+    }
+
+    #[test]
+    fn dry_run_changes_nothing_and_creates_no_backup() {
+        let e = env();
+        let s = open(&e);
+        s.write_csv("a.csv", V1, WriteOptions::default()).unwrap();
+        let before = listing(s.csv_root());
+        let before_mod = tree(&e.mod_root);
+        for confirm in [false, true] {
+            let out = s.write_csv("a.csv", V2, dry(confirm)).unwrap();
+            assert!(out.existed && !out.applied && !out.unchanged && out.backup.is_none());
+            assert_eq!(out.diff.added.len(), 1);
+            assert_eq!(out.diff.modified.len(), 1);
+            assert!(out.diff.removed.is_empty());
+            assert_eq!(out.diff.added[0].key, "3");
+            assert_eq!(out.diff.modified[0].key, "2");
+            assert_eq!(listing(s.csv_root()), before, "confirm={confirm}");
+        }
+        assert_eq!(s.read_csv("a.csv").unwrap(), V1);
+        assert!(!s.csv_root().join(BACKUP_DIR).exists());
+        assert_eq!(tree(&e.mod_root), before_mod);
+    }
+
+    #[test]
+    fn dry_run_on_a_new_file_creates_neither_file_nor_folders() {
+        let e = env();
+        let s = open(&e);
+        let before = listing(s.csv_root());
+        let out = s
+            .write_csv("nouveau/dossier/b.csv", V1, dry(false))
+            .unwrap();
+        assert!(!out.existed && !out.applied);
+        assert_eq!(out.diff.added.len(), 2);
+        assert_eq!(listing(s.csv_root()), before);
+        assert!(!s.csv_root().join("nouveau").exists());
+    }
+
+    #[test]
+    fn dry_run_still_applies_every_refusal() {
+        let e = env();
+        let s = open(&e);
+        assert!(matches!(
+            s.write_csv("../x.csv", V1, dry(false)),
+            Err(StoreError::Sandbox(_))
+        ));
+        assert!(matches!(
+            s.write_csv(".backup/x.csv", V1, dry(false)),
+            Err(StoreError::ReservedPath { .. })
+        ));
+        assert!(matches!(
+            s.write_csv("x.csv", b"\"non ferme", dry(false)),
+            Err(StoreError::InvalidCsv { .. })
+        ));
+    }
+
+    #[test]
+    fn overwrite_without_confirm_is_refused_and_leaves_everything_alone() {
+        let e = env();
+        let s = open(&e);
+        s.write_csv("a.csv", V1, WriteOptions::default()).unwrap();
+        let before = listing(s.csv_root());
+        let err = s
+            .write_csv("a.csv", V2, WriteOptions::default())
+            .unwrap_err();
+        assert!(matches!(err, StoreError::AlreadyExists { .. }));
+        assert!(err.to_string().contains("confirm"));
+        assert_eq!(listing(s.csv_root()), before);
+        assert_eq!(s.read_csv("a.csv").unwrap(), V1);
+    }
+
+    #[test]
+    fn overwrite_with_confirm_backs_up_then_writes_atomically() {
+        let e = env();
+        let s = open(&e);
+        s.write_csv("data/a.csv", V1, WriteOptions::default())
+            .unwrap();
+        let out = s.write_csv("data/a.csv", V2, confirmed()).unwrap();
+        assert!(out.existed && out.applied && !out.unchanged);
+        let backup = out.backup.clone().expect("sauvegarde attendue");
+        assert!(backup.starts_with(s.csv_root().join(BACKUP_DIR).join("data")));
+        assert_eq!(
+            fs::read(&backup).unwrap(),
+            V1,
+            "sauvegarde identique à l'original"
+        );
+        assert_eq!(s.read_csv("data/a.csv").unwrap(), V2, "nouveau contenu");
+        assert_eq!(
+            out.diff.summary(),
+            "1 ajoutée(s), 1 modifiée(s), 0 supprimée(s)"
+        );
+        assert!(leftover_temp_files(s.csv_root()).is_empty());
+        // le fichier parse et revalide: le nouveau contenu est exactement V2
+        assert_eq!(
+            Table::parse(&s.read_csv("data/a.csv").unwrap())
+                .unwrap()
+                .to_bytes(),
+            V2
+        );
+    }
+
+    #[test]
+    fn successive_overwrites_keep_every_backup() {
+        let e = env();
+        let s = open(&e);
+        s.write_csv("a.csv", V1, WriteOptions::default()).unwrap();
+        let b1 = s
+            .write_csv("a.csv", V2, confirmed())
+            .unwrap()
+            .backup
+            .unwrap();
+        let b2 = s
+            .write_csv("a.csv", V1, confirmed())
+            .unwrap()
+            .backup
+            .unwrap();
+        assert_ne!(b1, b2);
+        assert_eq!(fs::read(&b1).unwrap(), V1);
+        assert_eq!(fs::read(&b2).unwrap(), V2);
+    }
+
+    #[test]
+    fn identical_content_is_a_no_op_without_backup() {
+        let e = env();
+        let s = open(&e);
+        s.write_csv("a.csv", V1, WriteOptions::default()).unwrap();
+        for opts in [WriteOptions::default(), confirmed()] {
+            let out = s.write_csv("a.csv", V1, opts).unwrap();
+            assert!(out.unchanged && !out.applied && out.backup.is_none());
+            assert!(out.diff.is_empty());
+        }
+        assert!(!s.csv_root().join(BACKUP_DIR).exists());
+    }
+
+    #[test]
+    fn row_reordering_is_a_real_change_that_gets_backed_up() {
+        let e = env();
+        let s = open(&e);
+        s.write_csv("a.csv", V1, WriteOptions::default()).unwrap();
+        let reordered = b"---,A\n2,\"y\"\n1,\"x\"\n";
+        let out = s.write_csv("a.csv", reordered, confirmed()).unwrap();
+        assert!(out.diff.order_changed && out.applied && out.backup.is_some());
+    }
+
+    #[test]
+    fn simulated_backup_failure_leaves_the_original_intact() {
+        let e = env();
+        let s = open(&e);
+        s.write_csv("a.csv", V1, WriteOptions::default()).unwrap();
+        // `.backup` est un fichier: la sauvegarde est impossible
+        fs::write(s.csv_root().join(BACKUP_DIR), "obstacle").unwrap();
+        let before = listing(s.csv_root());
+        let err = s.write_csv("a.csv", V2, confirmed()).unwrap_err();
+        assert!(matches!(err, StoreError::BackupFailed { .. }), "{err}");
+        assert!(err.to_string().contains("n'a pas eu lieu"));
+        assert_eq!(s.read_csv("a.csv").unwrap(), V1);
+        assert_eq!(
+            listing(s.csv_root()),
+            before,
+            "aucune écriture, aucun temporaire"
+        );
+    }
+
+    /// Lien de dossier: symlink (Unix) ou jonction NTFS (Windows, sans privilège).
+    fn dir_link(link: &Path, target: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            let out = std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(link)
+                .arg(target)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+        }
+    }
+
+    #[test]
+    fn backup_dir_is_inside_csv_root_and_goes_through_the_sandbox() {
+        let e = env();
+        let s = open(&e);
+        s.write_csv("a.csv", V1, WriteOptions::default()).unwrap();
+        // `.backup` détourné vers l'extérieur de CSV_ROOT (lien ou jonction)
+        let outside = e.mod_root.parent().unwrap().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        dir_link(&s.csv_root().join(BACKUP_DIR), &outside);
+        let err = s.write_csv("a.csv", V2, confirmed()).unwrap_err();
+        assert!(matches!(err, StoreError::BackupFailed { .. }), "{err}");
+        assert_eq!(s.read_csv("a.csv").unwrap(), V1, "original intact");
+        assert!(
+            fs::read_dir(&outside).unwrap().next().is_none(),
+            "rien écrit hors CSV_ROOT"
+        );
+        // et, par le chemin normal, la sauvegarde est bien sous CSV_ROOT/.backup
+        let e2 = env();
+        let s2 = open(&e2);
+        s2.write_csv("a.csv", V1, WriteOptions::default()).unwrap();
+        let b = s2
+            .write_csv("a.csv", V2, confirmed())
+            .unwrap()
+            .backup
+            .unwrap();
+        assert!(b.starts_with(s2.csv_root().join(BACKUP_DIR)));
+    }
+
+    #[test]
+    fn backup_dir_pointing_into_the_mod_is_refused() {
+        let e = env();
+        let s = open(&e);
+        s.write_csv("a.csv", V1, WriteOptions::default()).unwrap();
+        dir_link(&s.csv_root().join(BACKUP_DIR), &e.mod_root);
+        let before = tree(&e.mod_root);
+        let err = s.write_csv("a.csv", V2, confirmed()).unwrap_err();
+        assert!(matches!(err, StoreError::BackupFailed { .. }), "{err}");
+        assert_eq!(tree(&e.mod_root), before);
+        assert_eq!(s.read_csv("a.csv").unwrap(), V1);
+    }
+
+    #[test]
+    fn write_atomic_replaces_and_leaves_no_temporary() {
+        let e = env();
+        let dir = e.csv_root.clone();
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("t.csv");
+        write_atomic(&target, b"un").unwrap();
+        write_atomic(&target, b"deux").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"deux");
+        assert!(leftover_temp_files(&dir).is_empty());
+    }
+
+    #[test]
+    fn write_atomic_failure_cleans_up_and_never_half_writes() {
+        let e = env();
+        let dir = e.csv_root.clone();
+        fs::create_dir_all(&dir).unwrap();
+        // la cible est un dossier non vide: le renommage final échoue
+        let target = dir.join("t.csv");
+        fs::create_dir_all(target.join("contenu")).unwrap();
+        fs::write(target.join("contenu").join("f"), "x").unwrap();
+        assert!(write_atomic(&target, b"nouveau").is_err());
+        assert!(leftover_temp_files(&dir).is_empty());
+        assert_eq!(fs::read(target.join("contenu").join("f")).unwrap(), b"x");
+    }
+
+    #[test]
+    fn invalid_or_unreadable_csv_is_refused_before_any_change() {
+        let e = env();
+        let s = open(&e);
+        s.write_csv("a.csv", V1, WriteOptions::default()).unwrap();
+        let err = s
+            .write_csv("a.csv", b"---,A\n1\n", confirmed())
+            .unwrap_err();
+        assert!(matches!(err, StoreError::InvalidCsv { .. }), "{err}");
+        // fichier existant illisible (écrit hors du magasin): intact, pas de sauvegarde
+        fs::write(s.csv_root().join("bad.csv"), "\"jamais ferme").unwrap();
+        let err = s.write_csv("bad.csv", V1, confirmed()).unwrap_err();
+        assert!(
+            matches!(err, StoreError::ExistingUnreadable { .. }),
+            "{err}"
+        );
+        assert_eq!(
+            fs::read(s.csv_root().join("bad.csv")).unwrap(),
+            b"\"jamais ferme"
+        );
+        assert!(!s.csv_root().join(BACKUP_DIR).exists());
+        assert_eq!(s.read_csv("a.csv").unwrap(), V1);
+    }
+
+    #[test]
+    fn overwrite_flows_never_touch_the_mod() {
+        let e = env();
+        let s = open(&e);
+        let before = tree(&e.mod_root);
+        s.write_csv("a.csv", V1, WriteOptions::default()).unwrap();
+        s.write_csv("a.csv", V2, dry(true)).unwrap();
+        s.write_csv("a.csv", V2, confirmed()).unwrap();
+        assert_eq!(tree(&e.mod_root), before);
     }
 
     #[cfg(unix)]
@@ -584,10 +1032,12 @@ mod tests {
         let s = open(&e);
         std::os::unix::fs::symlink(&e.mod_root, s.csv_root().join("viamod")).unwrap();
         let before = tree(&e.mod_root);
-        let err = s.write_csv("viamod/new.csv", b"x").unwrap_err();
+        let err = s
+            .write_csv("viamod/new.csv", b"x", WriteOptions::default())
+            .unwrap_err();
         assert!(matches!(err, StoreError::ModReadOnly { .. }), "{err}");
         let err = s
-            .write_csv("viamod/Content/deep/new.csv", b"x")
+            .write_csv("viamod/Content/deep/new.csv", b"x", WriteOptions::default())
             .unwrap_err();
         assert!(matches!(err, StoreError::ModReadOnly { .. }), "{err}");
         assert_eq!(tree(&e.mod_root), before);
@@ -601,7 +1051,9 @@ mod tests {
         let parent = e.mod_root.parent().unwrap().to_path_buf();
         let s = CsvStore::open(&Config::new(&e.mod_root, Some(parent))).unwrap();
         let before = tree(&e.mod_root);
-        let err = s.write_csv("MOD/new.csv", b"x").unwrap_err();
+        let err = s
+            .write_csv("MOD/new.csv", b"x", WriteOptions::default())
+            .unwrap_err();
         assert!(matches!(err, StoreError::ModReadOnly { .. }), "{err}");
 
         // jonction NTFS depuis CSV_ROOT vers le mod
@@ -617,7 +1069,9 @@ mod tests {
             .unwrap();
         assert!(out.status.success());
         let before2 = tree(&e2.mod_root);
-        let err = s2.write_csv("viamod/new.csv", b"x").unwrap_err();
+        let err = s2
+            .write_csv("viamod/new.csv", b"x", WriteOptions::default())
+            .unwrap_err();
         assert!(matches!(err, StoreError::ModReadOnly { .. }), "{err}");
         assert_eq!(tree(&e2.mod_root), before2);
         assert_eq!(tree(&e.mod_root), before);
@@ -696,10 +1150,15 @@ mod tests {
             let name = unique_name();
             let rel = name.clone();
             let expected = store.csv_root().join(&name);
+            let mut extended = FIXTURE.to_vec();
+            extended.extend_from_slice(b"5,\"12000\",\"1\",\"3\"\n");
             let _cleanup = Cleanup(expected.clone());
 
             // création + écriture
-            let written = store.write_csv(&rel, FIXTURE).unwrap();
+            let written = store
+                .write_csv(&rel, FIXTURE, WriteOptions::default())
+                .unwrap()
+                .path;
             assert_eq!(written, expected);
             assert!(written.is_file());
             assert!(store.guard_write(&written).is_ok());
@@ -707,12 +1166,51 @@ mod tests {
             let back = store.read_csv(&rel).unwrap();
             assert_eq!(back, FIXTURE);
             assert_eq!(Table::parse(&back).unwrap().to_bytes(), FIXTURE);
-            // pas d'écrasement
+            // pas d'écrasement sans confirm
             assert!(matches!(
-                store.write_csv(&rel, b"autre"),
+                store.write_csv(&rel, &extended, WriteOptions::default()),
                 Err(StoreError::AlreadyExists { .. })
             ));
-            // suppression du fichier de test uniquement
+            // dry-run: rien ne change (contenu, taille, date), pas de sauvegarde
+            let meta = fs::metadata(&written).unwrap();
+            let dry = store
+                .write_csv(
+                    &rel,
+                    &extended,
+                    WriteOptions {
+                        dry_run: true,
+                        confirm: true,
+                    },
+                )
+                .unwrap();
+            assert!(!dry.applied && dry.backup.is_none() && dry.diff.added.len() == 1);
+            let meta2 = fs::metadata(&written).unwrap();
+            assert_eq!(
+                (meta.len(), meta.modified().unwrap()),
+                (meta2.len(), meta2.modified().unwrap())
+            );
+            assert_eq!(fs::read(&written).unwrap(), FIXTURE);
+            // modification confirmée: sauvegarde sous CSV_ROOT\.backup, identique à l'original
+            let out = store
+                .write_csv(
+                    &rel,
+                    &extended,
+                    WriteOptions {
+                        dry_run: false,
+                        confirm: true,
+                    },
+                )
+                .unwrap();
+            assert!(out.applied);
+            let backup = out.backup.unwrap();
+            let _backup_cleanup = Cleanup(backup.clone());
+            assert!(backup.starts_with(store.csv_root().join(BACKUP_DIR)));
+            assert_eq!(fs::read(&backup).unwrap(), FIXTURE);
+            assert_eq!(fs::read(&written).unwrap(), extended);
+            assert!(store.guard_write(&backup).is_ok());
+            fs::remove_file(&backup).unwrap();
+            let _ = fs::remove_dir(store.csv_root().join(BACKUP_DIR)); // seulement si vide
+                                                                       // suppression du fichier de test uniquement
             fs::remove_file(&written).unwrap();
             assert!(!written.exists());
         }
@@ -745,7 +1243,10 @@ mod tests {
             // les sorties de CSV_ROOT vers le mod sont arrêtées par la sandbox
             for rel in ["../test/x.csv", "..\\test\\x.csv", "D:/Program Files/x.csv"] {
                 assert!(
-                    matches!(store.write_csv(rel, b"x"), Err(StoreError::Sandbox(_))),
+                    matches!(
+                        store.write_csv(rel, b"x", WriteOptions::default()),
+                        Err(StoreError::Sandbox(_))
+                    ),
                     "{rel}"
                 );
             }

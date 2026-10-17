@@ -26,7 +26,7 @@ Usage type : dans Claude, « génère 20 armes nordheimer ». Le serveur valide 
 ## Règles de sécurité (non négociables)
 - **Sandbox** : le serveur n'écrit que sous `CSV_ROOT` (variable d'env ; défaut `D:\ConanMod\csv`, hors du dossier du mod). Tout chemin qui en sort (`..`, chemin absolu, lien symbolique, jonction) est refusé.
 - **`MOD_ROOT` est en lecture seule** (variable d'env, sans défaut) : toute écriture qui se résout sous lui est refusée (`StoreError::ModReadOnly`), et `CSV_ROOT` ne peut pas être situé sous lui. Ne jamais toucher à `modinfo.json` ni `active.txt`. L'import CSV → DataTable reste manuel dans le Devkit.
-- **Jamais d'écrasement silencieux** : un fichier existant est sauvegardé dans `.backup/<horodatage>/` avant d'être réécrit.
+- **Jamais d'écrasement silencieux** : un fichier existant n'est remplacé qu'avec `confirm: true`, après sauvegarde dans `CSV_ROOT/.backup/<sous-dossier>/<nom>.<horodatage UTC>.<ext>` (si la sauvegarde échoue, rien n'est modifié). Écriture atomique (fichier temporaire du même dossier puis renommage). Les sauvegardes ne sont jamais purgées automatiquement (rétention à décider).
 - **Dry-run par défaut** : `write_datatable` renvoie d'abord un aperçu (diff). L'écriture réelle demande `confirm: true`.
 - Les données reçues du client sont non fiables par principe. Tout est validé.
 
