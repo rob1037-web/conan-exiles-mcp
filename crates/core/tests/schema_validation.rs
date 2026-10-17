@@ -30,7 +30,7 @@ fn row(key: &str, source: &str, target: &str, weight: &str, row_type: &str) -> S
 fn the_real_table_is_valid_against_its_schema() {
     assert_eq!(validate(FIXTURE), Ok(5));
     let s = schema();
-    assert_eq!(s.key_column.as_deref(), Some("---"));
+    assert_eq!(s.key_column, "---");
     let names: Vec<_> = s.fields.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names, ["SourceName", "TargetName", "Weight", "RowType"]);
 }
@@ -417,4 +417,27 @@ fn rows_from_a_client_are_validated_like_a_csv() {
     let short = vec![vec!["Trash1".to_string(), "N".into()]];
     let errors = Table::for_schema(&s, &short).unwrap_err();
     assert_eq!((errors[0].rule, errors[0].line), (Rule::ColumnCount, 2));
+}
+
+#[test]
+fn every_versioned_schema_loads_in_a_schema_root() {
+    use conan_core::SchemaStore;
+    let dir = tempfile::tempdir().unwrap();
+    for (name, text) in [
+        ("DT_Purge_Nordheimer", SCHEMA),
+        (
+            "lightning_rod_loot",
+            include_str!("../../../schemas/lightning_rod_loot.toml"),
+        ),
+        ("exemple", include_str!("../../../schemas/exemple.toml")),
+    ] {
+        std::fs::write(dir.path().join(format!("{name}.toml")), text).unwrap();
+    }
+    let store = SchemaStore::open(dir.path()).unwrap();
+    for entry in store.list().unwrap() {
+        let schema = entry
+            .status
+            .unwrap_or_else(|e| panic!("{}: {e}", entry.file));
+        assert_eq!(schema.key_column, "---", "{}", entry.file);
+    }
 }

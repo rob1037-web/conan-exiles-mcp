@@ -5,8 +5,8 @@
 //! ```toml
 //! name = "weapon_items"            # = nom de la table (et du fichier, dans SCHEMA_ROOT)
 //! description = "Armes"            # optionnel
-//! key_column = "---"               # en-tête de la colonne clé (Row Name) dans le CSV exporté
-//!                                  # (obligatoire pour les schémas de SCHEMA_ROOT)
+//! key_column = "---"               # OBLIGATOIRE: en-tête de la colonne clé (Row Name) dans le
+//!                                  # CSV exporté
 //!
 //! [[fields]]
 //! name = "Damage"
@@ -73,6 +73,8 @@ pub enum SchemaError {
     EmptyFieldName,
     #[error("le nom du schéma ne peut pas être vide")]
     EmptySchemaName,
+    #[error("le champ key_column est obligatoire (en-tête de la colonne clé dans le CSV exporté, `---` dans les exports Devkit)")]
+    MissingKeyColumn,
     #[error("key_column ne peut pas être vide (en-tête de la colonne clé, `---` dans les exports Devkit)")]
     EmptyKeyColumn,
 }
@@ -83,7 +85,7 @@ pub struct Schema {
     pub name: String,
     pub description: Option<String>,
     /// En-tête attendu de la colonne clé de ligne (`---` dans les exports observés).
-    pub key_column: Option<String>,
+    pub key_column: String,
     pub fields: Vec<Field>,
 }
 
@@ -179,9 +181,11 @@ impl Schema {
         if raw.name.trim().is_empty() {
             return Err(SchemaError::EmptySchemaName);
         }
-        if raw.key_column.as_deref() == Some("") {
-            return Err(SchemaError::EmptyKeyColumn);
-        }
+        let key_column = match raw.key_column {
+            None => return Err(SchemaError::MissingKeyColumn),
+            Some(k) if k.is_empty() => return Err(SchemaError::EmptyKeyColumn),
+            Some(k) => k,
+        };
         let mut fields: Vec<Field> = Vec::with_capacity(raw.fields.len());
         for rf in raw.fields {
             let field = convert_field(rf)?;
@@ -199,7 +203,7 @@ impl Schema {
         Ok(Schema {
             name: raw.name,
             description: raw.description,
-            key_column: raw.key_column,
+            key_column,
             fields,
         })
     }
@@ -416,7 +420,9 @@ mod tests {
     }
 
     fn one_field(body: &str) -> Result<Schema, SchemaError> {
-        parse(&format!("name = \"t\"\n[[fields]]\nname = \"F\"\n{body}\n"))
+        parse(&format!(
+            "name = \"t\"\nkey_column = \"---\"\n[[fields]]\nname = \"F\"\n{body}\n"
+        ))
     }
 
     #[test]
@@ -424,6 +430,7 @@ mod tests {
         let s = parse(
             r#"
 name = "demo"
+key_column = "---"
 description = "d"
 
 [[fields]]
@@ -489,7 +496,7 @@ type = "raw"
     #[test]
     fn field_order_is_preserved() {
         let s =
-            parse("name='t'\n[[fields]]\nname='B'\ntype='raw'\n[[fields]]\nname='A'\ntype='raw'\n")
+            parse("name='t'\nkey_column='---'\n[[fields]]\nname='B'\ntype='raw'\n[[fields]]\nname='A'\ntype='raw'\n")
                 .unwrap();
         let names: Vec<_> = s.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["B", "A"]);
@@ -576,16 +583,18 @@ type = "raw"
     #[test]
     fn duplicate_fields_rejected() {
         let e =
-            parse("name='t'\n[[fields]]\nname='A'\ntype='raw'\n[[fields]]\nname='a'\ntype='raw'\n")
+            parse("name='t'\nkey_column='---'\n[[fields]]\nname='A'\ntype='raw'\n[[fields]]\nname='a'\ntype='raw'\n")
                 .unwrap_err();
         assert!(matches!(e, SchemaError::DuplicateField { .. }));
     }
 
     #[test]
-    fn key_column_is_optional_but_never_empty() {
+    fn key_column_is_mandatory_and_never_empty() {
         let s = parse("name='t'\nkey_column='---'\n").unwrap();
-        assert_eq!(s.key_column.as_deref(), Some("---"));
-        assert_eq!(parse("name='t'\n").unwrap().key_column, None);
+        assert_eq!(s.key_column, "---");
+        let e = parse("name='t'\n").unwrap_err();
+        assert!(matches!(e, SchemaError::MissingKeyColumn));
+        assert!(e.to_string().contains("key_column"));
         assert!(matches!(
             parse("name='t'\nkey_column=''\n"),
             Err(SchemaError::EmptyKeyColumn)
@@ -595,10 +604,10 @@ type = "raw"
     #[test]
     fn empty_names_rejected() {
         assert!(matches!(
-            parse("name=' '\n"),
+            parse("name=' '\nkey_column='---'\n"),
             Err(SchemaError::EmptySchemaName)
         ));
-        let e = parse("name='t'\n[[fields]]\nname=''\ntype='raw'\n").unwrap_err();
+        let e = parse("name='t'\nkey_column='---'\n[[fields]]\nname=''\ntype='raw'\n").unwrap_err();
         assert!(matches!(e, SchemaError::EmptyFieldName));
     }
 

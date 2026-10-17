@@ -8,11 +8,14 @@
 #     le Devkit exporte tous les champs de la struct, une absence signifie que le schéma ne
 #     correspond pas à l'export. `required` ne concerne que les cellules vides.
 #   - Les noms de champs sont uniques, sans tenir compte de la casse (comme les FName Unreal).
-#   - La colonne clé de ligne (la première du CSV) est implicite : elle ne se déclare pas ici.
-#     Son en-tête (`---` dans les exports Devkit observés) est conservé tel quel, sans être supposé.
+#   - La colonne clé de ligne (la première du CSV) ne se déclare pas dans [[fields]] ; son
+#     en-tête, lu dans l'export (`---` dans les exports Devkit), se déclare avec `key_column`,
+#     qui est OBLIGATOIRE.
 
 # Nom du schéma (obligatoire, non vide).
 name = "exemple"
+# En-tête de la colonne clé de ligne dans le CSV exporté (obligatoire).
+key_column = "---"
 # Description (optionnelle).
 description = "Schéma d'exemple couvrant tous les types"
 

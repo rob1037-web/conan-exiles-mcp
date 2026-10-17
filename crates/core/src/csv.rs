@@ -269,8 +269,7 @@ fn write_cell(out: &mut String, cell: &CsvCell) {
 
 /// Valide toute la table contre le schéma et renvoie **toutes** les erreurs trouvées.
 ///
-/// 1. L'en-tête doit correspondre exactement au schéma: colonne clé (`key_column` si
-///    déclaré), puis les colonnes du schéma, mêmes noms, même ordre, sans doublon. Tout écart
+/// 1. L'en-tête doit correspondre exactement au schéma: colonne clé (`key_column`), puis les colonnes du schéma, mêmes noms, même ordre, sans doublon. Tout écart
 ///    est une dérive de schéma (`Rule::is_schema_drift`); les lignes ne sont alors pas validées.
 /// 2. Chaque ligne: types, bornes, champs obligatoires, valeurs d'enum.
 /// 3. Les clés de ligne sont uniques (casse ASCII ignorée, comme les FName).
@@ -330,7 +329,8 @@ fn validate_header(schema: &Schema, table: &Table) -> Vec<ValidationError> {
             expected,
         });
     };
-    if let Some(expected_key) = &schema.key_column {
+    {
+        let expected_key = &schema.key_column;
         let got = &table.header.cells[0].text;
         if got != expected_key {
             drift(
@@ -436,11 +436,10 @@ impl Table {
             quoted: false,
         };
         let quoted = |text: String| CsvCell { text, quoted: true };
-        let header_cells =
-            std::iter::once(schema.key_column.clone().unwrap_or_else(|| "---".into()))
-                .chain(schema.fields.iter().map(|f| f.name.clone()))
-                .map(plain)
-                .collect();
+        let header_cells = std::iter::once(schema.key_column.clone())
+            .chain(schema.fields.iter().map(|f| f.name.clone()))
+            .map(plain)
+            .collect();
         Ok(Table {
             bom: false,
             newline: Newline::Lf,
@@ -697,7 +696,7 @@ mod tests {
     #[test]
     fn optional_column_missing_from_header_is_an_error_too() {
         let schema = Schema::from_toml_str(
-            "name='t'\n[[fields]]\nname='A'\ntype='int'\n[[fields]]\nname='B'\ntype='int'\n",
+            "name='t'\nkey_column='---'\n[[fields]]\nname='A'\ntype='int'\n[[fields]]\nname='B'\ntype='int'\n",
         )
         .unwrap();
         let t = parse("---,A\n1,2\n").unwrap();
@@ -709,9 +708,10 @@ mod tests {
 
     #[test]
     fn header_errors_are_reported_once() {
-        let schema =
-            Schema::from_toml_str("name='t'\n[[fields]]\nname='A'\ntype='int'\nrequired=true\n")
-                .unwrap();
+        let schema = Schema::from_toml_str(
+            "name='t'\nkey_column='---'\n[[fields]]\nname='A'\ntype='int'\nrequired=true\n",
+        )
+        .unwrap();
         let t = parse("---,B\n1,2\n2,3\n").unwrap();
         let e = validate_table(&schema, &t).unwrap_err();
         assert_eq!(e.len(), 2); // B inconnue, A absente
@@ -720,7 +720,9 @@ mod tests {
 
     #[test]
     fn row_errors_carry_the_physical_line() {
-        let schema = Schema::from_toml_str("name='t'\n[[fields]]\nname='A'\ntype='int'\n").unwrap();
+        let schema =
+            Schema::from_toml_str("name='t'\nkey_column='---'\n[[fields]]\nname='A'\ntype='int'\n")
+                .unwrap();
         let t = parse("---,A\n1,5\n2,x\n").unwrap();
         let e = validate_table(&schema, &t).unwrap_err();
         assert_eq!(e.len(), 1);
@@ -911,7 +913,7 @@ mod tests {
 
     fn two_col_schema() -> Schema {
         Schema::from_toml_str(
-            "name='t'\n[[fields]]\nname='A'\ntype='float'\n[[fields]]\nname='B'\ntype='int'\n",
+            "name='t'\nkey_column='---'\n[[fields]]\nname='A'\ntype='float'\n[[fields]]\nname='B'\ntype='int'\n",
         )
         .unwrap()
     }
@@ -978,7 +980,9 @@ mod tests {
 
     #[test]
     fn push_row_rejects_unknown_column() {
-        let schema = Schema::from_toml_str("name='t'\n[[fields]]\nname='Z'\ntype='int'\n").unwrap();
+        let schema =
+            Schema::from_toml_str("name='t'\nkey_column='---'\n[[fields]]\nname='Z'\ntype='int'\n")
+                .unwrap();
         let mut t = parse("---,A\n").unwrap();
         let row = validate_row(
             &schema,
@@ -1017,7 +1021,9 @@ mod tests {
 
     #[test]
     fn push_row_after_file_without_final_newline() {
-        let schema = Schema::from_toml_str("name='t'\n[[fields]]\nname='A'\ntype='int'\n").unwrap();
+        let schema =
+            Schema::from_toml_str("name='t'\nkey_column='---'\n[[fields]]\nname='A'\ntype='int'\n")
+                .unwrap();
         let mut t = parse("---,A\n1,\"2\"").unwrap();
         let row = validate_row(
             &schema,

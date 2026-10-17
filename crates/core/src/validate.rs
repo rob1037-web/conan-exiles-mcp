@@ -305,6 +305,7 @@ mod tests {
         Schema::from_toml_str(
             r#"
 name = "t"
+key_column = "---"
 [[fields]]
 name = "Label"
 type = "string"

@@ -837,7 +837,11 @@ mod tests {
         let e = env();
         let schema_root = e.csv_root.join("schemas"); // SCHEMA_ROOT sous CSV_ROOT: écrasable par erreur
         fs::create_dir_all(&schema_root).unwrap();
-        fs::write(schema_root.join("DT_X.toml"), "name = \"DT_X\"\n").unwrap();
+        fs::write(
+            schema_root.join("DT_X.toml"),
+            "name = \"DT_X\"\nkey_column = \"---\"\n",
+        )
+        .unwrap();
         let cfg = Config::new(&e.mod_root, Some(e.csv_root.clone())).with_schema_root(&schema_root);
         let s = CsvStore::open(&cfg).unwrap();
         let before = tree(&schema_root);

@@ -36,8 +36,6 @@ pub enum SchemaStoreError {
         declared: String,
         expected: String,
     },
-    #[error("schéma {file:?} incomplet: le champ key_column est obligatoire (en-tête de la colonne clé dans le CSV exporté, `---` dans les exports Devkit)")]
-    KeyColumnMissing { file: String },
     #[error("schéma {file:?} trop gros ({size} octets, maximum {max})")]
     TooLarge { file: String, size: u64, max: u64 },
     #[error(transparent)]
@@ -56,9 +54,9 @@ impl SchemaStoreError {
             SchemaStoreError::RootUnusable { .. } => "SchemaRootUnavailable",
             SchemaStoreError::InvalidTableName { .. } => "InvalidTableName",
             SchemaStoreError::NotFound { .. } => "SchemaMissing",
-            SchemaStoreError::Malformed { .. }
-            | SchemaStoreError::NameMismatch { .. }
-            | SchemaStoreError::KeyColumnMissing { .. } => "SchemaMalformed",
+            SchemaStoreError::Malformed { .. } | SchemaStoreError::NameMismatch { .. } => {
+                "SchemaMalformed"
+            }
             SchemaStoreError::TooLarge { .. } => "SchemaMalformed",
             SchemaStoreError::Sandbox(SandboxError::Escapes { .. }) => "PathEscapes",
             SchemaStoreError::Sandbox(SandboxError::WriteThroughLink { .. }) => "LinkRefused",
@@ -181,9 +179,6 @@ impl SchemaStore {
                 expected: table.to_owned(),
             });
         }
-        if schema.key_column.is_none() {
-            return Err(SchemaStoreError::KeyColumnMissing { file });
-        }
         Ok(schema)
     }
 
@@ -242,7 +237,7 @@ mod tests {
     fn loads_a_valid_schema_and_lists_it() {
         let (_t, s) = store_with(&[("DT_X.toml", GOOD), ("notes.txt", "x")]);
         let schema = s.load("DT_X").unwrap();
-        assert_eq!(schema.key_column.as_deref(), Some("---"));
+        assert_eq!(schema.key_column, "---");
         assert_eq!(schema.fields.len(), 1);
         let list = s.list().unwrap();
         assert_eq!(list.len(), 1);
@@ -305,8 +300,12 @@ mod tests {
             Err(SchemaStoreError::NameMismatch { .. })
         ));
         let e = s.load("DT_Z").unwrap_err();
-        assert!(matches!(e, SchemaStoreError::KeyColumnMissing { .. }));
-        assert!(e.to_string().contains("key_column"));
+        assert!(matches!(
+            &e,
+            SchemaStoreError::Malformed { source, .. } if matches!(**source, SchemaError::MissingKeyColumn)
+        ));
+        assert_eq!(e.code(), "SchemaMalformed");
+        assert!(e.to_string().contains("DT_Z.toml") && e.to_string().contains("key_column"));
     }
 
     #[test]

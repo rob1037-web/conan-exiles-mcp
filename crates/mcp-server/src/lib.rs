@@ -355,7 +355,7 @@ impl ConanServer {
     ) -> Result<CallToolResult, String> {
         guarded(|| {
             let schema = self.schema_for(&p.table)?;
-            let key = schema.key_column.clone().unwrap_or_default();
+            let key = schema.key_column.clone();
             let header: Vec<String> = std::iter::once(key.clone())
                 .chain(schema.fields.iter().map(|f| f.name.clone()))
                 .collect();
