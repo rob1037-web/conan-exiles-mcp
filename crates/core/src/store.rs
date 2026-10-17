@@ -67,6 +67,34 @@ pub enum StoreError {
     },
 }
 
+impl StoreError {
+    /// Nom court et stable de l'erreur, pour que les clients (MCP) puissent la reconnaître.
+    pub fn code(&self) -> &'static str {
+        match self {
+            StoreError::Sandbox(SandboxError::NotFound { .. }) => "NotFound",
+            StoreError::Sandbox(SandboxError::Escapes { .. }) => "PathEscapes",
+            StoreError::Sandbox(SandboxError::WriteThroughLink { .. }) => "LinkRefused",
+            StoreError::Sandbox(_) => "PathRefused",
+            StoreError::ModRootUnusable { .. } => "ModRootUnusable",
+            StoreError::CsvRootUnusable { .. } => "CsvRootUnusable",
+            StoreError::CsvRootInsideMod { .. } => "CsvRootInsideMod",
+            StoreError::ModReadOnly { .. } => "ModReadOnly",
+            StoreError::AlreadyExists { .. } => "AlreadyExists",
+            StoreError::ReservedPath { .. } => "ReservedPath",
+            StoreError::BackupFailed { .. } => "BackupFailed",
+            StoreError::TooLarge { .. } => "TooLarge",
+            StoreError::List(ListError::Sandbox(SandboxError::NotFound { .. })) => "NotFound",
+            StoreError::List(ListError::Sandbox(SandboxError::Escapes { .. })) => "PathEscapes",
+            StoreError::List(ListError::Sandbox(_)) => "PathRefused",
+            StoreError::List(ListError::InternalFolder { .. }) => "InternalFolder",
+            StoreError::List(_) => "ListFailed",
+            StoreError::InvalidCsv { .. } => "InvalidCsv",
+            StoreError::ExistingUnreadable { .. } => "ExistingUnreadable",
+            StoreError::Io { .. } => "IoError",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CsvStore {
     csv: Sandbox,

@@ -151,6 +151,65 @@ fn common_order_differs(old: &Table, new: &Table) -> bool {
     keys(old, &in_new) != keys(new, &in_old)
 }
 
+/// Nombre maximal de lignes détaillées par section dans `render`.
+const RENDER_LIMIT: usize = 50;
+
+impl TableDiff {
+    /// Diff lisible (texte brut), détaillant au plus `RENDER_LIMIT` lignes par section.
+    ///
+    /// ```text
+    /// Résumé: 1 ajoutée(s), 1 modifiée(s), 0 supprimée(s)
+    /// Lignes ajoutées:
+    ///   + 3 | 3,"z"
+    /// Lignes modifiées:
+    ///   ~ 2 | A: "y" -> "Y"
+    /// ```
+    pub fn render(&self) -> String {
+        let mut out = format!("Résumé: {}\n", self.summary());
+        let more = |n: usize| {
+            if n > RENDER_LIMIT {
+                format!("  … et {} autre(s)\n", n - RENDER_LIMIT)
+            } else {
+                String::new()
+            }
+        };
+        let join = |cells: &[String]| cells.join(", ");
+        if !self.added.is_empty() {
+            out.push_str("Lignes ajoutées:\n");
+            for r in self.added.iter().take(RENDER_LIMIT) {
+                out.push_str(&format!("  + {} | {}\n", r.key, join(&r.cells)));
+            }
+            out.push_str(&more(self.added.len()));
+        }
+        if !self.modified.is_empty() {
+            out.push_str("Lignes modifiées:\n");
+            for r in self.modified.iter().take(RENDER_LIMIT) {
+                let changes: Vec<String> = r
+                    .changes
+                    .iter()
+                    .map(|c| {
+                        if c.quoting_only {
+                            format!("{}: {:?} (guillemets seuls)", c.column, c.after)
+                        } else {
+                            format!("{}: {:?} -> {:?}", c.column, c.before, c.after)
+                        }
+                    })
+                    .collect();
+                out.push_str(&format!("  ~ {} | {}\n", r.key, changes.join("; ")));
+            }
+            out.push_str(&more(self.modified.len()));
+        }
+        if !self.removed.is_empty() {
+            out.push_str("Lignes supprimées:\n");
+            for r in self.removed.iter().take(RENDER_LIMIT) {
+                out.push_str(&format!("  - {} | {}\n", r.key, join(&r.cells)));
+            }
+            out.push_str(&more(self.removed.len()));
+        }
+        out
+    }
+}
+
 fn diff_row(r: &CsvRecord) -> DiffRow {
     DiffRow {
         key: r.cells[0].text.clone(),
@@ -245,6 +304,29 @@ mod tests {
         let d = TableDiff::between(None, &t("---,A\n1,\"x\"\n2,\"y\"\n"));
         assert_eq!(d.added.len(), 2);
         assert!(!d.header_changed && d.removed.is_empty() && d.modified.is_empty());
+    }
+
+    #[test]
+    fn render_is_readable_and_bounded() {
+        let old = t("---,A\n1,\"x\"\n2,\"y\"\n3,\"z\"\n");
+        let new = t("---,A\n1,\"x\"\n2,\"Y\"\n4,\"w\"\n");
+        let text = TableDiff::between(Some(&old), &new).render();
+        assert_eq!(
+            text,
+            "Résumé: 1 ajoutée(s), 1 modifiée(s), 1 supprimée(s)\n\
+             Lignes ajoutées:\n  + 4 | 4, w\n\
+             Lignes modifiées:\n  ~ 2 | A: \"y\" -> \"Y\"\n\
+             Lignes supprimées:\n  - 3 | 3, z\n"
+        );
+        let mut big = String::from("---,A\n");
+        for i in 0..120 {
+            big.push_str(&format!("{i},\"v\"\n"));
+        }
+        let d = TableDiff::between(None, &t(&big));
+        let text = d.render();
+        assert!(text.contains("  + 49 | "));
+        assert!(!text.contains("  + 50 | "));
+        assert!(text.contains("… et 70 autre(s)"));
     }
 
     #[test]
