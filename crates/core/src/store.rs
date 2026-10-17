@@ -16,7 +16,10 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::Config;
-use crate::sandbox::{Sandbox, SandboxError};
+use crate::sandbox::{check_relative, Sandbox, SandboxError};
+
+/// Dossier des sauvegardes, sous `CSV_ROOT`. Jamais purgé automatiquement.
+pub const BACKUP_DIR: &str = ".backup";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -35,6 +38,12 @@ pub enum StoreError {
     ModReadOnly { path: PathBuf, mod_root: PathBuf },
     #[error("écriture refusée: {path:?} existe déjà (aucun écrasement; la sauvegarde et la confirmation ne sont pas encore implémentées)")]
     AlreadyExists { path: PathBuf },
+    #[error(
+        "chemin {path:?} refusé: le dossier {BACKUP_DIR} est réservé aux sauvegardes automatiques"
+    )]
+    ReservedPath { path: String },
+    #[error("sauvegarde impossible de {path:?} ({reason}): la modification n'a pas eu lieu")]
+    BackupFailed { path: PathBuf, reason: String },
     #[error("erreur d'entrée/sortie sur {path:?}: {source}")]
     Io {
         path: PathBuf,
@@ -105,6 +114,74 @@ impl CsvStore {
         Ok(())
     }
 
+    /// Copie un CSV existant dans `CSV_ROOT/.backup/`, en conservant son sous-dossier, avec
+    /// l'horodatage UTC dans le nom : `DT_X.csv` devient
+    /// `.backup/<sous-dossier>/DT_X.20261017T221530.123Z.csv`. Le chemin de la sauvegarde
+    /// passe par la sandbox comme tout autre. Ne remplace jamais une sauvegarde existante.
+    /// Renvoie le chemin de la sauvegarde.
+    pub fn backup_csv(&self, rel: &str) -> Result<PathBuf, StoreError> {
+        let source = self.csv.resolve_read(rel)?;
+        let bytes = std::fs::read(&source).map_err(|e| StoreError::BackupFailed {
+            path: source.clone(),
+            reason: e.to_string(),
+        })?;
+        self.backup_bytes(rel, &bytes)
+    }
+
+    fn backup_bytes(&self, rel: &str, original: &[u8]) -> Result<PathBuf, StoreError> {
+        let failed = |path: &Path, reason: String| StoreError::BackupFailed {
+            path: path.to_path_buf(),
+            reason,
+        };
+        let stamp = format_timestamp(std::time::SystemTime::now());
+        let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+        let dir_prefix = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("{dir}/")
+        };
+        for attempt in 0..1000 {
+            let unique = if attempt == 0 {
+                stamp.clone()
+            } else {
+                format!("{stamp}-{attempt}")
+            };
+            let file = match name.rsplit_once('.') {
+                Some((stem, ext)) if !stem.is_empty() => format!("{stem}.{unique}.{ext}"),
+                _ => format!("{name}.{unique}"),
+            };
+            let backup_rel = format!("{BACKUP_DIR}/{dir_prefix}{file}");
+            let target = self
+                .csv
+                .resolve_write(&backup_rel)
+                .map_err(|e| failed(Path::new(&backup_rel), e.to_string()))?;
+            self.guard_write(&target)?;
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| failed(parent, e.to_string()))?;
+            }
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)
+            {
+                Ok(mut f) => {
+                    if let Err(e) = f.write_all(original).and_then(|()| f.sync_all()) {
+                        drop(f);
+                        let _ = std::fs::remove_file(&target); // sauvegarde incomplète: pas de demi-sauvegarde
+                        return Err(failed(&target, e.to_string()));
+                    }
+                    return Ok(target);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(failed(&target, e.to_string())),
+            }
+        }
+        Err(failed(
+            Path::new(rel),
+            "trop de sauvegardes de même horodatage".into(),
+        ))
+    }
+
     /// Lit un CSV existant sous `CSV_ROOT`.
     pub fn read_csv(&self, rel: &str) -> Result<Vec<u8>, StoreError> {
         let path = self.csv.resolve_read(rel)?;
@@ -115,6 +192,12 @@ impl CsvStore {
     /// Refuse un chemin qui se résout sous `MOD_ROOT` et un fichier déjà existant.
     /// Renvoie le chemin réel écrit.
     pub fn write_csv(&self, rel: &str, bytes: &[u8]) -> Result<PathBuf, StoreError> {
+        let comps = check_relative(rel)?;
+        if comps[0].eq_ignore_ascii_case(BACKUP_DIR) {
+            return Err(StoreError::ReservedPath {
+                path: rel.to_owned(),
+            });
+        }
         let target = match self.csv.resolve_write(rel) {
             Ok(p) => p,
             // Un lien ou une jonction qui mène dans le mod : message explicite « mod ».
@@ -157,6 +240,31 @@ impl CsvStore {
             })?;
         Ok(target)
     }
+}
+
+/// Horodatage UTC pour les noms de sauvegarde : `YYYYMMDDTHHMMSS.mmmZ` (sans `:`, valide
+/// dans un nom de fichier Windows).
+fn format_timestamp(t: std::time::SystemTime) -> String {
+    let since = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = i64::try_from(since.as_secs()).unwrap_or(i64::MAX);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Jours depuis 1970-01-01 -> date civile (algorithme de H. Hinnant).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}.{:03}Z",
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60,
+        since.subsec_millis()
+    )
 }
 
 /// Chemin canonique d'une racine qui n'existe peut-être pas encore : le plus profond
@@ -387,6 +495,86 @@ mod tests {
             Err(StoreError::ModReadOnly { .. })
         ));
         assert!(s.guard_write(s.csv_root()).is_ok());
+    }
+
+    #[test]
+    fn timestamp_format() {
+        use std::time::{Duration, UNIX_EPOCH};
+        assert_eq!(format_timestamp(UNIX_EPOCH), "19700101T000000.000Z");
+        let t = UNIX_EPOCH + Duration::from_millis(1_700_000_000_123);
+        assert_eq!(format_timestamp(t), "20231114T221320.123Z");
+        let leap = UNIX_EPOCH + Duration::from_secs(1_709_164_800); // 2024-02-29
+        assert_eq!(format_timestamp(leap), "20240229T000000.000Z");
+    }
+
+    #[test]
+    fn backup_is_an_identical_timestamped_copy_under_csv_root_backup_dir() {
+        let e = env();
+        let s = open(&e);
+        s.write_csv("datatables/DT_X.csv", b"---,A\n1,\"2\"\n")
+            .unwrap();
+        let b = s.backup_csv("datatables/DT_X.csv").unwrap();
+        assert!(b.starts_with(s.csv_root().join(BACKUP_DIR).join("datatables")));
+        let name = b.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("DT_X.") && name.ends_with("Z.csv"),
+            "{name}"
+        );
+        assert_eq!(fs::read(&b).unwrap(), b"---,A\n1,\"2\"\n");
+        // l'original est intact et une 2e sauvegarde ne remplace pas la 1re
+        assert_eq!(
+            s.read_csv("datatables/DT_X.csv").unwrap(),
+            b"---,A\n1,\"2\"\n"
+        );
+        let b2 = s.backup_csv("datatables/DT_X.csv").unwrap();
+        assert_ne!(b, b2);
+        assert!(b.exists() && b2.exists());
+    }
+
+    #[test]
+    fn backup_of_a_missing_file_or_without_extension() {
+        let e = env();
+        let s = open(&e);
+        assert!(matches!(
+            s.backup_csv("absent.csv"),
+            Err(StoreError::Sandbox(SandboxError::NotFound { .. }))
+        ));
+        s.write_csv("README", b"---\n").unwrap();
+        let b = s.backup_csv("README").unwrap();
+        assert!(b
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("README."));
+    }
+
+    #[test]
+    fn backup_dir_is_reserved_for_writes() {
+        let e = env();
+        let s = open(&e);
+        for rel in [".backup/x.csv", ".BACKUP/x.csv", ".backup/sub/x.csv"] {
+            assert!(
+                matches!(
+                    s.write_csv(rel, b"---\n"),
+                    Err(StoreError::ReservedPath { .. })
+                ),
+                "{rel}"
+            );
+        }
+        assert!(!s.csv_root().join(BACKUP_DIR).exists());
+    }
+
+    #[test]
+    fn backup_failure_is_reported_and_leaves_the_original_alone() {
+        let e = env();
+        let s = open(&e);
+        s.write_csv("a.csv", b"---,A\n1,\"1\"\n").unwrap();
+        // `.backup` existe mais est un fichier: impossible d'y créer une sauvegarde
+        fs::write(s.csv_root().join(BACKUP_DIR), "obstacle").unwrap();
+        let err = s.backup_csv("a.csv").unwrap_err();
+        assert!(matches!(err, StoreError::BackupFailed { .. }), "{err}");
+        assert!(err.to_string().contains("n'a pas eu lieu"));
+        assert_eq!(s.read_csv("a.csv").unwrap(), b"---,A\n1,\"1\"\n");
     }
 
     #[cfg(unix)]
