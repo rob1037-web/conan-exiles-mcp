@@ -59,21 +59,21 @@ impl fmt::Display for PathRule {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
-    #[error("chemin {path:?} refusé: {rule}. Attendu: chemin relatif à MOD_ROOT, composants séparés par '/', sans '..'")]
+    #[error("chemin {path:?} refusé: {rule}. Attendu: chemin relatif à la racine, composants séparés par '/', sans '..'")]
     InvalidPath { path: String, rule: PathRule },
-    #[error("chemin {path:?} refusé: résolu en {resolved:?}, en dehors de MOD_ROOT ({root:?}) (lien symbolique ou jonction)")]
+    #[error("chemin {path:?} refusé: résolu en {resolved:?}, en dehors de la racine ({root:?}) (lien symbolique ou jonction)")]
     Escapes {
         path: String,
         resolved: PathBuf,
         root: PathBuf,
     },
-    #[error("chemin {path:?} introuvable sous MOD_ROOT ({root:?})")]
+    #[error("chemin {path:?} introuvable sous la racine ({root:?})")]
     NotFound { path: String, root: PathBuf },
     #[error("chemin {path:?} refusé: {link:?} est un lien (symbolique, jonction ou lien pendant); l'écriture à travers un lien est interdite")]
     WriteThroughLink { path: String, link: PathBuf },
     #[error("chemin {path:?} refusé: {parent:?} existe mais n'est pas un dossier")]
     ParentNotDirectory { path: String, parent: PathBuf },
-    #[error("MOD_ROOT {root:?} inutilisable: {reason}")]
+    #[error("racine {root:?} inutilisable: {reason}")]
     BadRoot { root: PathBuf, reason: String },
     #[error("chemin {path:?}: erreur d'entrée/sortie sur {at:?}: {source}")]
     Io {
