@@ -64,7 +64,12 @@ async fn real_disk_end_to_end_through_mcp() {
     let mod_before = snapshot();
     let top_before = mod_top_level();
 
-    let s = connect(&Config::new(REAL_MOD_ROOT, None)).await; // crée D:\ConanMod\csv au besoin
+    // SCHEMA_ROOT temporaire contenant le schéma réel de la table (le vrai dossier de schémas
+    // de l'utilisateur n'est pas touché).
+    let schemas = tempfile::tempdir().unwrap();
+    fs::write(schemas.path().join(format!("{TABLE}.toml")), SCHEMA_TOML).unwrap();
+    let cfg = Config::new(REAL_MOD_ROOT, None).with_schema_root(schemas.path());
+    let s = connect(&cfg).await; // crée D:\ConanMod\csv au besoin
     let name = format!(
         "_conan_mcp_test_{}_{}.csv",
         std::process::id(),
@@ -73,7 +78,13 @@ async fn real_disk_end_to_end_through_mcp() {
             .unwrap()
             .as_nanos()
     );
+    let w = |content: &str, dry: Option<bool>, confirm: Option<bool>| {
+        let mut v = write_args(TABLE, content, dry, confirm);
+        v["path"] = json!(name);
+        v
+    };
     let mut cleanup = Cleanup(vec![Path::new(r"D:\ConanMod\csv").join(&name)]);
+    let v2 = csv_v2();
 
     // le mod est listable et lisible (lecture seule)
     let r = s.call("list_mod_files", json!({"source": "mod"})).await;
@@ -82,37 +93,47 @@ async fn real_disk_end_to_end_through_mcp() {
     assert!(listing.contains("modinfo.json") && !listing.contains(".backup"));
 
     // dry-run par défaut: rien n'est écrit
-    let r = s
-        .call("write_datatable", write_args(&name, CSV_V1, None, None))
-        .await;
+    let r = s.call("write_datatable", w(CSV_V1, None, None)).await;
     assert!(text(&r).starts_with("DRY-RUN"), "{}", text(&r));
+    assert!(!cleanup.0[0].exists());
+
+    // dry-run invalide: rapport d'erreurs, toujours rien d'écrit; écriture réelle refusée
+    let invalid = CSV_V1.replace("\"5.000000\"", "\"cinq\"");
+    let r = s.call("write_datatable", w(&invalid, None, None)).await;
+    assert!(
+        text(&r).starts_with("DRY-RUN — VALIDATION ÉCHOUÉE"),
+        "{}",
+        text(&r)
+    );
+    let r = s
+        .call("write_datatable", w(&invalid, Some(false), Some(true)))
+        .await;
+    assert!(
+        is_error(&r) && text(&r).starts_with("ERREUR ValidationFailed:"),
+        "{}",
+        text(&r)
+    );
     assert!(!cleanup.0[0].exists());
 
     // création réelle, relecture
     let r = s
-        .call(
-            "write_datatable",
-            write_args(&name, CSV_V1, Some(false), Some(true)),
-        )
+        .call("write_datatable", w(CSV_V1, Some(false), Some(true)))
         .await;
     assert!(!is_error(&r), "{}", text(&r));
     assert_eq!(fs::read_to_string(&cleanup.0[0]).unwrap(), CSV_V1);
     let r = s.call("read_datatable", json!({"path": name})).await;
-    assert_eq!(structured(&r)["rows"][0], json!(["1", "x", "10"]));
+    assert_eq!(structured(&r)["rows"][0][0], "Trash1");
 
     // modification confirmée: sauvegarde identique à l'original, absente du listage
     let r = s
-        .call(
-            "write_datatable",
-            write_args(&name, CSV_V2, Some(false), Some(true)),
-        )
+        .call("write_datatable", w(&v2, Some(false), Some(true)))
         .await;
     assert!(!is_error(&r), "{}", text(&r));
     let backup = PathBuf::from(structured(&r)["backup_real_path"].as_str().unwrap());
     cleanup.0.push(backup.clone());
     assert!(backup.starts_with(r"D:\ConanMod\csv\.backup"), "{backup:?}");
     assert_eq!(fs::read_to_string(&backup).unwrap(), CSV_V1);
-    assert_eq!(fs::read_to_string(&cleanup.0[0]).unwrap(), CSV_V2);
+    assert_eq!(fs::read_to_string(&cleanup.0[0]).unwrap(), v2);
     let r = s.call("list_mod_files", json!({})).await;
     let csv_listing = serde_json::to_string(structured(&r)).unwrap();
     assert!(
@@ -122,12 +143,9 @@ async fn real_disk_end_to_end_through_mcp() {
 
     // tentatives vers le mod: refusées
     for path in ["../Program Files/x.csv", "D:/Program Files/x.csv"] {
-        let r = s
-            .call(
-                "write_datatable",
-                write_args(path, CSV_V1, Some(false), Some(true)),
-            )
-            .await;
+        let mut args = write_args(TABLE, CSV_V1, Some(false), Some(true));
+        args["path"] = json!(path);
+        let r = s.call("write_datatable", args).await;
         assert!(is_error(&r), "{path}");
     }
 

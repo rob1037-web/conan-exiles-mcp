@@ -70,11 +70,25 @@ pub fn structured(r: &CallToolResult) -> &Value {
     r.structured_content.as_ref().expect("contenu structuré")
 }
 
-/// `<tmp>/mod` (avec modinfo.json, active.txt, Content/Data/m.csv) et `<tmp>/data/csv`.
+/// Table réelle (export Devkit) et son schéma.
+pub const TABLE: &str = "DT_Purge_Nordheimer";
+pub const CSV_V1: &str = include_str!("../../../../fixtures/DT_Purge_Nordheimer.csv");
+pub const SCHEMA_TOML: &str = include_str!("../../../../schemas/DT_Purge_Nordheimer.toml");
+
+/// V1 + une ligne ajoutée + un poids modifié.
+pub fn csv_v2() -> String {
+    let mut v = CSV_V1.replace("\"10.000000\"", "\"12.000000\"");
+    v.push_str("Trash5,\"Nordheimer\",\"PurgeNew_Nordheimer_Grunt_3\",\"2.000000\",\"WeightedSpawnTable\"\n");
+    v
+}
+
+/// `<tmp>/mod` (modinfo.json, active.txt, Content/Data/m.csv), `<tmp>/data/csv` et
+/// `<tmp>/schemas` (avec le schéma de la table réelle).
 pub struct Env {
     pub tmp: tempfile::TempDir,
     pub mod_root: PathBuf,
     pub csv_root: PathBuf,
+    pub schema_root: PathBuf,
 }
 
 impl Env {
@@ -85,21 +99,27 @@ impl Env {
         std::fs::write(mod_root.join("modinfo.json"), "{\"name\":\"test\"}").unwrap();
         std::fs::write(mod_root.join("active.txt"), "").unwrap();
         std::fs::write(mod_root.join("Content/Data/m.csv"), CSV_V1).unwrap();
+        let schema_root = tmp.path().join("schemas");
+        std::fs::create_dir_all(&schema_root).unwrap();
+        std::fs::write(schema_root.join(format!("{TABLE}.toml")), SCHEMA_TOML).unwrap();
         let csv_root = tmp.path().join("data").join("csv");
         Env {
             tmp,
             mod_root,
             csv_root,
+            schema_root,
         }
     }
 
     pub fn config(&self) -> Config {
+        Config::new(&self.mod_root, Some(self.csv_root.clone())).with_schema_root(&self.schema_root)
+    }
+
+    /// Même configuration, mais SCHEMA_ROOT non configuré.
+    pub fn config_without_schemas(&self) -> Config {
         Config::new(&self.mod_root, Some(self.csv_root.clone()))
     }
 }
-
-pub const CSV_V1: &str = "---,A,B\n1,\"x\",\"10\"\n2,\"y\",\"20\"\n";
-pub const CSV_V2: &str = "---,A,B\n1,\"x\",\"10\"\n2,\"Y\",\"20\"\n3,\"z\",\"30\"\n";
 
 /// Contenu (chemin relatif, octets) de tous les fichiers sous `dir`.
 pub fn tree(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
@@ -123,12 +143,12 @@ pub fn tree(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 pub fn write_args(
-    path: &str,
+    table: &str,
     content: &str,
     dry_run: Option<bool>,
     confirm: Option<bool>,
 ) -> Value {
-    let mut v = json!({"path": path, "content": content});
+    let mut v = json!({"table": table, "content": content});
     if let Some(d) = dry_run {
         v["dry_run"] = json!(d);
     }

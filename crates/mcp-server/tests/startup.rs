@@ -74,3 +74,26 @@ fn refuses_csv_root_inside_mod_root_without_creating_anything() {
     assert!(msg.contains("lecture seule"), "{msg}");
     assert!(!mod_root.join("csv").exists());
 }
+
+#[test]
+fn schema_root_absent_or_invalid_never_prevents_startup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mod_root = tmp.path().join("mod");
+    fs::create_dir_all(&mod_root).unwrap();
+    let base = |schema: Option<OsString>| {
+        let mut v: Vec<(&'static str, OsString)> = vec![
+            ("MOD_ROOT", mod_root.clone().into()),
+            ("CSV_ROOT", tmp.path().join("csv").into()),
+        ];
+        if let Some(s) = schema {
+            v.push(("SCHEMA_ROOT", s));
+        }
+        vars(v)
+    };
+    assert!(build_server_from_vars(base(None)).is_ok());
+    assert!(build_server_from_vars(base(Some(OsString::new()))).is_ok());
+    assert!(build_server_from_vars(base(Some(tmp.path().join("absent").into()))).is_ok());
+    let schemas = tmp.path().join("schemas");
+    fs::create_dir_all(&schemas).unwrap();
+    assert!(build_server_from_vars(base(Some(schemas.into()))).is_ok());
+}
