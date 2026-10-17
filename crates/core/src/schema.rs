@@ -14,16 +14,14 @@
 //! max = 1000
 //! ```
 //!
-//! La colonne `Name` (clé de ligne Unreal) est implicite et ne se déclare pas.
+//! La colonne clé de ligne (premier champ d'une DataTable Unreal ; son en-tête, `---` dans
+//! les exports observés, n'est pas supposé) est implicite et ne se déclare pas.
 //! Toute clé ou tout type inconnu est une erreur : rien ne passe en silence.
 
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use toml::Value;
-
-/// Nom de la colonne clé des DataTables Unreal, implicite dans tout schéma.
-pub const NAME_COLUMN: &str = "Name";
 
 /// Types reconnus dans `type = "..."`.
 const KNOWN_TYPES: &[&str] = &["string", "int", "float", "bool", "enum", "asset_ref", "raw"];
@@ -67,8 +65,6 @@ pub enum SchemaError {
     DuplicateEnumValue { field: String, value: String },
     #[error("champ '{field}': nom déjà utilisé par le champ '{other}' (comparaison insensible à la casse)")]
     DuplicateField { field: String, other: String },
-    #[error("champ '{field}': nom réservé, la colonne '{NAME_COLUMN}' est implicite")]
-    ReservedField { field: String },
     #[error("champ sans nom (le nom ne peut pas être vide)")]
     EmptyFieldName,
     #[error("le nom du schéma ne peut pas être vide")]
@@ -83,7 +79,7 @@ pub struct Schema {
     pub fields: Vec<Field>,
 }
 
-/// Une colonne déclarée (hors `Name`).
+/// Une colonne déclarée (hors colonne clé de ligne).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub name: String,
@@ -177,9 +173,6 @@ impl Schema {
         let mut fields: Vec<Field> = Vec::with_capacity(raw.fields.len());
         for rf in raw.fields {
             let field = convert_field(rf)?;
-            if field.name == NAME_COLUMN {
-                return Err(SchemaError::ReservedField { field: field.name });
-            }
             if let Some(other) = fields
                 .iter()
                 .find(|f| f.name.eq_ignore_ascii_case(&field.name))
@@ -537,9 +530,7 @@ type = "raw"
     }
 
     #[test]
-    fn name_column_is_reserved_and_duplicates_rejected() {
-        let e = parse("name='t'\n[[fields]]\nname='Name'\ntype='raw'\n").unwrap_err();
-        assert!(matches!(e, SchemaError::ReservedField { .. }));
+    fn duplicate_fields_rejected() {
         let e = parse(
             "name='t'\n[[fields]]\nname='A'\ntype='raw'\n[[fields]]\nname='a'\ntype='raw'\n",
         )

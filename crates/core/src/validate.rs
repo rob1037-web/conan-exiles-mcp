@@ -10,7 +10,7 @@ use crate::value::{Cell, RawRow, Row, Value};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationError {
     pub line: usize,
-    /// Colonne en cause ; `None` pour la clé de ligne (`Name`).
+    /// Colonne en cause ; `None` pour la clé de ligne (première colonne).
     pub column: Option<String>,
     /// Valeur reçue ; `None` si la colonne est absente.
     pub received: Option<String>,
@@ -22,7 +22,7 @@ impl fmt::Display for ValidationError {
         write!(f, "ligne {}, ", self.line)?;
         match &self.column {
             Some(c) => write!(f, "champ '{c}'")?,
-            None => write!(f, "clé de ligne (Name)")?,
+            None => write!(f, "clé de ligne")?,
         }
         match &self.received {
             Some(v) => write!(f, ": reçu {v:?}")?,
@@ -44,8 +44,8 @@ pub fn validate_row(schema: &Schema, row: &RawRow) -> Result<Row, Vec<Validation
         expected,
     };
 
-    if row.name.trim().is_empty() {
-        errors.push(err(None, Some(&row.name), "une clé de ligne non vide".into()));
+    if row.key.trim().is_empty() {
+        errors.push(err(None, Some(&row.key), "une clé de ligne non vide".into()));
     }
 
     // Colonnes inconnues et doublons.
@@ -95,7 +95,7 @@ pub fn validate_row(schema: &Schema, row: &RawRow) -> Result<Row, Vec<Validation
     if errors.is_empty() {
         Ok(Row {
             line: row.line,
-            name: row.name.clone(),
+            key: row.key.clone(),
             cells,
         })
     } else {
@@ -223,7 +223,7 @@ type = "raw"
     fn row(cells: &[(&str, &str)]) -> RawRow {
         RawRow {
             line: 7,
-            name: "Row_1".into(),
+            key: "Row_1".into(),
             cells: cells.iter().map(|(c, v)| ((*c).into(), (*v).into())).collect(),
         }
     }
@@ -319,11 +319,11 @@ type = "raw"
     #[test]
     fn duplicate_column_and_empty_name() {
         let mut r = row(&[("Label", "a"), ("Label", "b")]);
-        r.name = "  ".into();
+        r.key = "  ".into();
         let e = validate_row(&schema(), &r).unwrap_err();
         assert_eq!(e.len(), 2);
         assert_eq!(e[0].column, None);
-        assert!(e[0].to_string().starts_with("ligne 7, clé de ligne (Name)"));
+        assert!(e[0].to_string().starts_with("ligne 7, clé de ligne"));
     }
 
     #[test]

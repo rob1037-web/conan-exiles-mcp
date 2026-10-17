@@ -9,8 +9,8 @@ pub struct RawRow {
     /// Numéro de ligne pour les messages d'erreur (1 = première ligne de données,
     /// ou l'indice fourni par l'appelant ; non interprété).
     pub line: usize,
-    /// Clé de ligne (colonne `Name`, quel que soit son en-tête dans le fichier).
-    pub name: String,
+    /// Clé de ligne (première colonne, quel que soit son en-tête dans le fichier).
+    pub key: String,
     /// Cellules dans l'ordre d'origine : (colonne, texte).
     pub cells: Vec<(String, String)>,
 }
@@ -44,7 +44,7 @@ pub struct Cell {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
     pub line: usize,
-    pub name: String,
+    pub key: String,
     pub cells: Vec<Cell>,
 }
 

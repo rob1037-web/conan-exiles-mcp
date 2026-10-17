@@ -5,8 +5,8 @@
 #   - Toute clé inconnue, tout type inconnu ou toute contrainte mal placée est une erreur.
 #   - L'ordre des [[fields]] est conservé.
 #   - Les noms de champs sont uniques, sans tenir compte de la casse (comme les FName Unreal).
-#   - La colonne clé de ligne (Name) est implicite : elle ne se déclare pas ici.
-#     L'en-tête exact de cette colonne dans le CSV sera déterminé à partir du fixture.
+#   - La colonne clé de ligne (la première du CSV) est implicite : elle ne se déclare pas ici.
+#     Son en-tête (`---` dans les exports Devkit observés) est conservé tel quel, sans être supposé.
 
 # Nom du schéma (obligatoire, non vide).
 name = "exemple"
