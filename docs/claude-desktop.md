@@ -39,7 +39,7 @@ Développeur → Modifier la configuration). Ajouter l'entrée sous `mcpServers`
 }
 ```
 
-Puis quitter **complètement** Claude Desktop (icône de la zone de notification) et le relancer.
+Puis **terminer TOUS les processus Claude** (Gestionnaire des tâches → onglet Processus, fin de tâche sur chaque processus « Claude »), puis relancer Claude Desktop. Fermer la fenêtre ne suffit pas : l'application reste en arrière-plan et ne relit pas la configuration.
 
 - `MOD_ROOT` : dossier du mod, **lecture seule** (obligatoire).
 - `CSV_ROOT` : dossier où les CSV sont écrits (défaut `D:\ConanMod\csv`), jamais sous `MOD_ROOT`.

@@ -72,7 +72,7 @@ fixtures/      # exports réels du Devkit pour les tests
 ### Phase 2 — Serveur MCP
 - [x] Serveur `rmcp` en stdio avec les outils `list_mod_files`, `read_datatable`, `write_datatable` (les outils de schéma passent en Phase 3)
 - [x] Dry-run + diff + `confirm`, sauvegarde automatique, écriture atomique
-- [ ] Branchement dans Claude Desktop (config `mcpServers`, voir `docs/claude-desktop.md`) et premier appel réel
+- [x] Branchement dans Claude Desktop (config `mcpServers`, voir `docs/claude-desktop.md`) et premier appel réel (validé : `list_mod_files` source=mod, `write_datatable` en dry-run)
 
 ### Phase 3 — Boucle réelle
 - [ ] `SCHEMA_ROOT` optionnel et outils `list_schemas`, `describe_schema`, `validate_rows` ; validation par schéma dans `write_datatable`
