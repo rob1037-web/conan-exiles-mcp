@@ -568,6 +568,15 @@ type = "raw"
     }
 
     #[test]
+    fn lightning_rod_loot_schema_parses() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../schemas/lightning_rod_loot.toml");
+        let s = Schema::from_file(Path::new(path)).unwrap();
+        let cols: Vec<_> = s.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(cols, ["ItemTemplateID", "MinAmount", "MaxAmount"]);
+        assert!(s.fields.iter().all(|f| f.required && f.ty.type_name() == "int"));
+    }
+
+    #[test]
     fn from_file_reports_missing_file() {
         let e = Schema::from_file(Path::new("/nonexistent/x.toml")).unwrap_err();
         assert!(matches!(e, SchemaError::Io { .. }));

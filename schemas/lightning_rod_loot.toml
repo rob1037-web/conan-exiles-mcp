@@ -1,0 +1,25 @@
+# DataTable : DT_LightningRodLoot_Common
+# Row Type  : STR_LightningRodLoot
+# Source    : fixtures/DT_LightningRodLoot_Common.csv (export brut du Devkit)
+#
+# La colonne clé de ligne (en-tête '---' dans l'export, valeurs 1, 2, 3...) est implicite.
+# Les trois colonnes ci-dessous sont les seules présentes dans le fixture.
+# Aucune borne n'est déclarée : le fixture ne permet pas de les déduire.
+
+name = "lightning_rod_loot"
+description = "Loot du paratonnerre (DT_LightningRodLoot_Common, struct STR_LightningRodLoot)"
+
+[[fields]]
+name = "ItemTemplateID"
+type = "int"
+required = true
+
+[[fields]]
+name = "MinAmount"
+type = "int"
+required = true
+
+[[fields]]
+name = "MaxAmount"
+type = "int"
+required = true
