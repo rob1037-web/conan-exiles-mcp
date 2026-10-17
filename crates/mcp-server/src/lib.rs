@@ -848,7 +848,8 @@ impl ServerHandler for ConanServer {
                  Toute écriture est validée contre le schéma de la table (list_schemas, \
                  describe_schema, validate_rows) et commence par un aperçu (dry_run, défaut): \
                  présentez le diff et le rapport de validation avant de demander dry_run=false + \
-                 confirm=true. L'import CSV -> DataTable reste manuel dans le Devkit.",
+                 confirm=true. Pour agir sur une seule ligne, préférez add_row, update_row ou \
+                 delete_row à write_datatable (qui remplace le fichier entier). L'import CSV -> DataTable reste manuel dans le Devkit.",
             )
     }
 }

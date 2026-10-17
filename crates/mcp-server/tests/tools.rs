@@ -27,7 +27,7 @@ async fn write(
 }
 
 #[tokio::test]
-async fn exposes_the_six_tools_with_descriptions() {
+async fn exposes_the_nine_tools_with_descriptions() {
     let env = Env::new();
     let s = connect(&env.config()).await;
     let tools = s.client.list_all_tools().await.unwrap();
@@ -36,10 +36,13 @@ async fn exposes_the_six_tools_with_descriptions() {
     assert_eq!(
         names,
         [
+            "add_row",
+            "delete_row",
             "describe_schema",
             "list_mod_files",
             "list_schemas",
             "read_datatable",
+            "update_row",
             "validate_rows",
             "write_datatable"
         ]

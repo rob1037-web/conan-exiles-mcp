@@ -23,13 +23,16 @@ Serveur `rmcp` en stdio, configuré par trois variables d'environnement : `MOD_R
 | `list_schemas` | Phase 3a (fait) | Liste les schémas de `SCHEMA_ROOT` et leur validité (un schéma malformé est signalé avec fichier et champ) |
 | `describe_schema` | Phase 3a (fait) | Renvoie l'en-tête CSV attendu, les colonnes, types, obligatoires, bornes et valeurs d'enum d'une table |
 | `validate_rows` | Phase 3a (fait) | Valide des lignes fournies (`[clé, valeurs…]`) contre un schéma ; sans lignes, valide le CSV existant dans `CSV_ROOT` (diagnostic de corruption, sans réparation). Rapport structuré complet : ligne, clé, colonne, valeur, règle |
+| `add_row` | Phase 3b (fait) | Ajoute une ligne **en fin de table** (clé inexistante, casse ignorée ; toutes les colonnes du schéma fournies). Dry-run par défaut, `dry_run=false` ET `confirm=true` pour écrire |
+| `update_row` | Phase 3b (fait) | Fusionne des champs **partiels** dans une ligne existante (clé existante, casse ignorée ; colonne clé non modifiable). Sans changement de valeur : « AUCUN CHANGEMENT », ni écriture ni sauvegarde |
+| `delete_row` | Phase 3b (fait) | Supprime une ligne existante ; le dry-run affiche la ligne qui serait supprimée. Outil séparé pour une approbation distincte |
 | `write_datatable` | Phase 3a (fait) | Écrit un CSV sous `CSV_ROOT` à partir d'un **contenu CSV complet** pour une `table` donnée, **toujours validé par le schéma de la table**. `dry_run` vaut true par défaut (aperçu = diff par clé + rapport de validation) ; toute écriture réelle exige `dry_run=false` ET `confirm=true` explicites et un contenu valide ; sauvegarde dans `.backup` avant remplacement. Aucun mode « forcer » |
 
 Décisions :
 - **Pas de schéma valide = pas d'écriture.** Si `SCHEMA_ROOT` est absent ou invalide, le serveur démarre, la lecture fonctionne, toute écriture (dry-run compris) est refusée (`SchemaRootUnavailable`). Même refus si le schéma de la table est absent (`SchemaMissing`) ou malformé (`SchemaMalformed`).
 - **Format de schéma : TOML conservé** (pas de JSON), un fichier `<table>.toml` par DataTable dans `SCHEMA_ROOT`, `name` identique au nom de la table. Champs : `name`, `description`, `key_column` (en-tête de la colonne clé dans le CSV exporté, `---` dans les exports Devkit ; **obligatoire**, y compris dans le parseur du noyau), puis `[[fields]]` **ordonnés** (`name`, `type` = string|int|float|bool|enum|asset_ref|raw, `required`, `values` pour enum, bornes). Voir `schemas/DT_Purge_Nordheimer.toml`.
 - **Correspondance exacte des en-têtes** (noms, casse et ordre, colonne clé comprise) : tout écart est une *dérive de schéma* qui bloque l'écriture (`SchemaDrift`). Contrôles de valeurs : types, obligatoires, enums, unicité des clés (casse ASCII ignorée). Tous les écarts sont listés.
-- `write_datatable` prend un contenu CSV complet. Les opérations par ligne (ajouter, modifier, supprimer des lignes) sont prévues en Phase 3b.
+- `write_datatable` prend un contenu CSV complet. Les opérations par ligne passent par `add_row` / `update_row` / `delete_row` (Phase 3b) : elles lisent le CSV existant, **refusent tout (`SourceInvalid`) s'il est invalide, sans réparation**, revalident la table entière, conservent l'ordre des lignes et réutilisent le chemin d'écriture de `write_datatable` (`CsvStore::write_with_schema` : format Devkit, `.backup`, diff par valeurs, écriture atomique). Le dry-run et l'écriture réelle renvoient le même diff. Hors périmètre : lots, renommage de clé, réparation de CSV, génération de schémas.
 - Le format JSON (CSV/JSON) n'est pas géré à ce stade.
 - Les schémas ne sont jamais créés ni modifiés par l'outil (pas de génération automatique, pas de réparation de CSV).
 
@@ -90,7 +93,7 @@ fixtures/      # exports réels du Devkit pour les tests
 
 ### Phase 3 — Boucle réelle
 - [x] Phase 3a : `SCHEMA_ROOT` optionnel, outils `list_schemas`, `describe_schema`, `validate_rows`, validation par schéma obligatoire dans `write_datatable` (table de test `DT_Purge_Nordheimer`)
-- [ ] Phase 3b : opérations par ligne dans `write_datatable` (ajouter, modifier, supprimer des lignes)
+- [x] Phase 3b (branche `phase-3b`, en attente de recette) : outils `add_row`, `update_row`, `delete_row`
 - [ ] Générer 20 lignes via Claude, réimporter dans le Devkit, vérifier en jeu
 - [ ] Chaque casse à l'import → nouveau test
 - [ ] Exporter une DataTable contenant du texte (virgules, guillemets, accents) pour valider les cas limites du CSV (tests actuellement marqués « non validé sur un export Devkit réel »)

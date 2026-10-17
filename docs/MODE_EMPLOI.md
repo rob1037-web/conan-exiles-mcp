@@ -149,7 +149,40 @@ Garde-fous : l'écriture réelle est refusée si le schéma est absent, malform�
 correspond pas, ou si une seule valeur est invalide. **Il n'existe aucun mode « forcer ».** Un
 contenu identique au fichier existant ne provoque ni écriture ni sauvegarde.
 
-## 4. Interpréter les erreurs
+## 4. Agir sur une seule ligne : `add_row`, `update_row`, `delete_row`
+
+Pour ajouter, modifier ou supprimer **une ligne** d'une table qui existe déjà dans `CSV_ROOT`,
+trois outils séparés (Claude Desktop demande donc une approbation distincte pour chacun, en
+particulier pour la suppression). Ils prennent `table` et `key` (obligatoires), `dry_run`
+(**vrai par défaut**), `confirm` et, si besoin, `path` (défaut `<table>.csv`).
+
+| Outil | Ce qu'il fait | `values` |
+|---|---|---|
+| `add_row` | Ajoute la ligne **en fin de table**. La clé ne doit pas exister | **Toutes** les colonnes du schéma (nom -> valeur). Colonne inconnue ou manquante : refus |
+| `update_row` | Modifie une ligne existante | **Seulement** les colonnes à changer, fusionnées avec la ligne existante. La colonne clé est refusée (`KeyNotEditable`) : renommer = `delete_row` puis `add_row` |
+| `delete_row` | Supprime une ligne existante | (aucune). Le dry-run affiche la ligne qui serait supprimée |
+
+Les valeurs peuvent être du texte, un nombre ou un booléen JSON.
+
+Règles communes :
+
+- **Clés insensibles à la casse** (les noms de ligne Unreal sont des `FName`) : `trash1` désigne
+  `Trash1`. À l'ajout, la casse fournie est conservée ; à la modification, la casse déjà stockée.
+- **Le CSV existant doit être valide.** Sinon refus de toute opération (`SourceInvalid`), sans aucune
+  réparation : lancez `validate_rows` pour le diagnostic.
+- **La table entière résultante est revalidée**, pas seulement la ligne touchée.
+- L'ordre des lignes existantes est conservé. Le fichier est réécrit au format du Devkit, avec
+  sauvegarde `.backup` horodatée avant toute écriture réelle, comme `write_datatable`.
+- Le dry-run et l'écriture réelle renvoient **le même diff**.
+- `update_row` qui ne change aucune valeur (par exemple `10` pour `10.000000`) répond
+  « AUCUN CHANGEMENT » : ni écriture ni sauvegarde.
+- Écriture réelle : `dry_run=false` **et** `confirm=true`, explicites.
+
+Exemples : « Ajoute la ligne Trash5 (SourceName Nordheimer, TargetName PurgeNew_X, Weight 2,
+RowType WeightedSpawnTable) à DT_Purge_Nordheimer » ; « Passe le poids de Trash1 à 25 » ;
+« Supprime Trash3 ».
+
+## 5. Interpréter les erreurs
 
 Les erreurs d'outil commencent par `ERREUR <code>:`. Les rapports de validation listent **toutes**
 les erreurs, chacune avec la ligne, la clé de ligne, la colonne, la valeur reçue, la règle violée
@@ -184,24 +217,31 @@ et la valeur attendue :
 | `SchemaDrift` | Écriture refusée : l'en-tête ne correspond pas au schéma |
 | `ValidationFailed` | Écriture refusée : au moins une valeur invalide |
 | `ConfirmRequired` | Écriture réelle sans `dry_run=false` **et** `confirm=true` |
+| `SourceInvalid` | Opération par ligne refusée : le CSV existant est invalide. `validate_rows` pour le diagnostic, aucune réparation |
+| `KeyExists`, `KeyNotFound` | `add_row` sur une clé déjà présente ; `update_row` / `delete_row` sur une clé absente (casse ignorée) |
+| `BadColumns` | Colonne inconnue, en double ou (pour `add_row`) manquante |
+| `KeyNotEditable` | `update_row` a reçu la colonne clé |
+| `InvalidParameter` | Valeur JSON non admise (ni texte, ni nombre, ni booléen) |
 | `ModReadOnly`, `SchemaReadOnly` | Tentative d'écriture sous `MOD_ROOT` ou `SCHEMA_ROOT` |
 | `PathRefused`, `PathEscapes`, `LinkRefused`, `ReservedPath`, `InvalidTableName` | Chemin ou nom de table refusé (hors dossier, `..`, lien, `.backup`…) |
 | `BackupFailed` | La sauvegarde a échoué : le fichier n'a pas été modifié |
 | `InvalidCsv`, `ExistingUnreadable` | Contenu ou fichier existant non lisible comme CSV |
 | `NotFound`, `TooLarge`, `IoError` | Fichier introuvable, trop gros (> 16 Mo), erreur disque |
 
-## 5. Approbation dans Claude Desktop
+## 6. Approbation dans Claude Desktop
 
 À la première utilisation de chaque outil, Claude Desktop demande une autorisation :
 
 - **Autoriser une fois** : l'outil s'exécute cette fois seulement. **Recommandé pour
   `write_datatable`** : chaque écriture réelle est ainsi validée par vous, en plus du
   `dry_run`/`confirm`.
+- Les outils `add_row`, `update_row`, `delete_row` et `write_datatable` modifient des fichiers :
+  gardez **Autoriser une fois**, en particulier pour `delete_row`.
 - **Toujours autoriser** : acceptable pour les outils de lecture (`list_mod_files`,
   `read_datatable`, `list_schemas`, `describe_schema`, `validate_rows`), qui ne modifient rien.
 - Un refus de votre part est respecté : Claude ne peut pas contourner l'autorisation.
 
-## 6. Recette sur la table de test
+## 7. Recette sur la table de test
 
 Avec `DT_Purge_Nordheimer.csv` présent dans `CSV_ROOT` et le schéma dans `SCHEMA_ROOT` :
 
