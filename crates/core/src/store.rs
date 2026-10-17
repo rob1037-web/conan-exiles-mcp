@@ -68,9 +68,37 @@ pub enum StoreError {
         table: String,
         errors: Vec<ValidationError>,
     },
+    #[error("opération par ligne refusée: le CSV existant {path:?} ne passe pas la validation de la table {table:?} ({count} erreur(s)), aucune réparation n'est tentée. Lancer validate_rows(table={table:?}) pour le diagnostic complet. Première erreur: {first}", count = errors.len(), first = errors.first().map(|e| e.to_string()).unwrap_or_default())]
+    SourceInvalid {
+        table: String,
+        path: String,
+        errors: Vec<ValidationError>,
+    },
+    #[error("ajout refusé: la clé {key:?} existe déjà dans la table {table:?} (ligne {line}, clé {existing:?}; les clés sont comparées sans tenir compte de la casse, comme les noms de ligne Unreal). Pour la modifier, utiliser update_row")]
+    KeyExists {
+        table: String,
+        key: String,
+        existing: String,
+        line: usize,
+    },
+    #[error("la clé {key:?} n'existe pas dans la table {table:?} (comparaison sans tenir compte de la casse). Clés existantes: {known}")]
+    KeyNotFound {
+        table: String,
+        key: String,
+        known: String,
+    },
+    #[error("colonnes invalides pour la ligne {key:?} de la table {table:?}:{details} Colonnes du schéma: {expected}")]
+    BadColumns {
+        table: String,
+        key: String,
+        details: String,
+        expected: String,
+    },
+    #[error("modification refusée: la colonne clé {key_column:?} n'est pas modifiable. Renommer une ligne revient à la supprimer (delete_row) puis à en ajouter une (add_row)")]
+    KeyNotEditable { key_column: String },
     #[error("contenu refusé, ce n'est pas un CSV valide: {source}")]
     InvalidCsv { source: CsvError },
-    #[error("le fichier existant {path:?} n'est pas un CSV lisible ({source}): comparaison impossible, il n'est pas modifié")]
+    #[error("le fichier existant {path:?} n'est pas un CSV lisible ({source}): comparaison impossible, il n'est pas modifié. Diagnostic: validate_rows")]
     ExistingUnreadable { path: PathBuf, source: CsvError },
     #[error("sauvegarde impossible de {path:?} ({reason}): la modification n'a pas eu lieu")]
     BackupFailed { path: PathBuf, reason: String },
@@ -105,6 +133,11 @@ impl StoreError {
             StoreError::List(ListError::InternalFolder { .. }) => "InternalFolder",
             StoreError::List(_) => "ListFailed",
             StoreError::InvalidCsv { .. } => "InvalidCsv",
+            StoreError::SourceInvalid { .. } => "SourceInvalid",
+            StoreError::KeyExists { .. } => "KeyExists",
+            StoreError::KeyNotFound { .. } => "KeyNotFound",
+            StoreError::BadColumns { .. } => "BadColumns",
+            StoreError::KeyNotEditable { .. } => "KeyNotEditable",
             StoreError::ValidationFailed { errors, .. }
                 if errors.iter().any(|e| e.rule.is_schema_drift()) =>
             {

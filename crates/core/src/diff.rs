@@ -109,6 +109,16 @@ impl TableDiff {
         diff
     }
 
+    /// Au moins une valeur change (ligne ajoutée, modifiée ou supprimée, en-tête ou ordre):
+    /// ni les guillemets seuls, ni le format du fichier n'en font partie.
+    pub fn has_value_changes(&self) -> bool {
+        self.header_changed
+            || self.order_changed
+            || !self.added.is_empty()
+            || !self.removed.is_empty()
+            || !self.modified.is_empty()
+    }
+
     /// Aucune différence : écrire ce contenu ne changerait rien.
     pub fn is_empty(&self) -> bool {
         !self.header_changed
