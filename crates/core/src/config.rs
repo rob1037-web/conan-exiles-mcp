@@ -4,7 +4,10 @@
 //! - `CSV_ROOT` : dossier où le serveur écrit les CSV, hors du dossier du mod.
 //!   Défaut : `D:\ConanMod\csv`. L'import CSV → DataTable reste manuel dans le Devkit.
 //!
-//! Les deux se règlent par variables d'environnement du même nom. `MOD_ROOT` n'a pas de
+//! - `SCHEMA_ROOT` : dossier des schémas TOML, **lecture seule**, optionnel. Absent ou invalide,
+//!   le serveur démarre et la lecture fonctionne, mais toute écriture est refusée.
+//!
+//! Les trois se règlent par variables d'environnement du même nom. `MOD_ROOT` n'a pas de
 //! défaut : il doit être fourni. Aucun accès disque ici, la config est un simple conteneur.
 
 use std::ffi::OsString;
@@ -27,6 +30,8 @@ pub struct Config {
     pub mod_root: PathBuf,
     /// Dossier d'écriture des CSV.
     pub csv_root: PathBuf,
+    /// Dossier des schémas, en lecture seule. `None` : non configuré (écritures refusées).
+    pub schema_root: Option<PathBuf>,
 }
 
 impl Config {
@@ -35,7 +40,14 @@ impl Config {
         Config {
             mod_root: mod_root.into(),
             csv_root: csv_root.unwrap_or_else(|| PathBuf::from(DEFAULT_CSV_ROOT)),
+            schema_root: None,
         }
+    }
+
+    /// Configure `SCHEMA_ROOT`.
+    pub fn with_schema_root(mut self, schema_root: impl Into<PathBuf>) -> Config {
+        self.schema_root = Some(schema_root.into());
+        self
     }
 
     /// Lit `MOD_ROOT` et `CSV_ROOT` dans l'environnement du processus.
@@ -53,7 +65,13 @@ impl Config {
             Some(v) if v.is_empty() => return Err(ConfigError::EmptyCsvRoot),
             Some(v) => Some(PathBuf::from(v)),
         };
-        Ok(Config::new(mod_root, csv_root))
+        let config = Config::new(mod_root, csv_root);
+        // SCHEMA_ROOT n'est jamais une erreur de configuration: absent ou invalide, le serveur
+        // démarre et refuse les écritures (voir `SchemaStore::open`).
+        Ok(match get("SCHEMA_ROOT") {
+            Some(v) => config.with_schema_root(v),
+            None => config,
+        })
     }
 }
 
@@ -82,6 +100,16 @@ mod tests {
         let c = Config::from_vars(vars(&[("MOD_ROOT", "/m"), ("CSV_ROOT", "/c")])).unwrap();
         assert_eq!(c, Config::new("/m", Some(PathBuf::from("/c"))));
         assert_ne!(c.mod_root, c.csv_root);
+    }
+
+    #[test]
+    fn schema_root_is_optional_and_never_a_startup_error() {
+        let c = Config::from_vars(vars(&[("MOD_ROOT", "/m")])).unwrap();
+        assert_eq!(c.schema_root, None);
+        let c = Config::from_vars(vars(&[("MOD_ROOT", "/m"), ("SCHEMA_ROOT", "/s")])).unwrap();
+        assert_eq!(c.schema_root, Some(PathBuf::from("/s")));
+        let c = Config::from_vars(vars(&[("MOD_ROOT", "/m"), ("SCHEMA_ROOT", "")])).unwrap();
+        assert_eq!(c.schema_root, Some(PathBuf::new())); // refusé plus tard, à l'ouverture
     }
 
     #[test]

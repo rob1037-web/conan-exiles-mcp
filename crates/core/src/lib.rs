@@ -7,6 +7,7 @@ pub mod diff;
 pub mod listing;
 pub mod sandbox;
 pub mod schema;
+pub mod schemas;
 pub mod store;
 pub mod validate;
 pub mod value;
@@ -17,6 +18,7 @@ pub use diff::{ColumnChange, DiffRow, ModifiedRow, TableDiff};
 pub use listing::{FileEntry, ListError, Listing, MAX_LIST_ENTRIES};
 pub use sandbox::{check_relative, PathRule, Sandbox, SandboxError};
 pub use schema::{Field, FieldType, Schema, SchemaError};
+pub use schemas::{SchemaEntry, SchemaStore, SchemaStoreError, MAX_SCHEMA_BYTES};
 pub use store::{
     CsvStore, ModReader, StoreError, WriteOptions, WriteOutcome, BACKUP_DIR, MAX_READ_BYTES,
 };

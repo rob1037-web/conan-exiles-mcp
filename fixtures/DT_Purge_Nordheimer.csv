@@ -1,0 +1,6 @@
+---,SourceName,TargetName,Weight,RowType
+Trash1,"Nordheimer","PurgeNew_Nordheimer_Grunt_1","10.000000","WeightedSpawnTable"
+Trash2,"Nordheimer","PurgeNew_Nordheimer_Grunt_2","3.000000","WeightedSpawnTable"
+Trash3,"NordheimerWolf","PurgeNew_Nordheimer_Wolf","5.000000","WeightedSpawnTable"
+Trash4,"NordheimerGiant","PurgeNew_Nordheimer_FrostGiant_1","1.000000","WeightedSpawnTable"
+TrashGeneric,"Nordheimer","PurgeNew_Generic_1","1.000000","WeightedSpawnTable"

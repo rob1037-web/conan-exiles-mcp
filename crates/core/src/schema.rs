@@ -3,8 +3,10 @@
 //! Format d'un schéma :
 //!
 //! ```toml
-//! name = "weapon_items"
+//! name = "weapon_items"            # = nom de la table (et du fichier, dans SCHEMA_ROOT)
 //! description = "Armes"            # optionnel
+//! key_column = "---"               # en-tête de la colonne clé (Row Name) dans le CSV exporté
+//!                                  # (obligatoire pour les schémas de SCHEMA_ROOT)
 //!
 //! [[fields]]
 //! name = "Damage"
@@ -14,8 +16,10 @@
 //! max = 1000
 //! ```
 //!
-//! La colonne clé de ligne (premier champ d'une DataTable Unreal ; son en-tête, `---` dans
-//! les exports observés, n'est pas supposé) est implicite et ne se déclare pas.
+//! Les `[[fields]]` sont **ordonnés** : ils décrivent les colonnes du CSV, dans l'ordre, après
+//! la colonne clé. La colonne clé de ligne (premier champ d'une DataTable Unreal) ne se
+//! déclare pas dans `fields` ; son en-tête, lu dans l'export (`---` dans les exports
+//! observés), se déclare avec `key_column`.
 //! Toute clé ou tout type inconnu est une erreur : rien ne passe en silence.
 
 use std::path::{Path, PathBuf};
@@ -69,6 +73,8 @@ pub enum SchemaError {
     EmptyFieldName,
     #[error("le nom du schéma ne peut pas être vide")]
     EmptySchemaName,
+    #[error("key_column ne peut pas être vide (en-tête de la colonne clé, `---` dans les exports Devkit)")]
+    EmptyKeyColumn,
 }
 
 /// Un schéma de DataTable.
@@ -76,6 +82,8 @@ pub enum SchemaError {
 pub struct Schema {
     pub name: String,
     pub description: Option<String>,
+    /// En-tête attendu de la colonne clé de ligne (`---` dans les exports observés).
+    pub key_column: Option<String>,
     pub fields: Vec<Field>,
 }
 
@@ -140,6 +148,7 @@ impl FieldType {
 struct RawSchema {
     name: String,
     description: Option<String>,
+    key_column: Option<String>,
     #[serde(default)]
     fields: Vec<RawField>,
 }
@@ -170,6 +179,9 @@ impl Schema {
         if raw.name.trim().is_empty() {
             return Err(SchemaError::EmptySchemaName);
         }
+        if raw.key_column.as_deref() == Some("") {
+            return Err(SchemaError::EmptyKeyColumn);
+        }
         let mut fields: Vec<Field> = Vec::with_capacity(raw.fields.len());
         for rf in raw.fields {
             let field = convert_field(rf)?;
@@ -187,6 +199,7 @@ impl Schema {
         Ok(Schema {
             name: raw.name,
             description: raw.description,
+            key_column: raw.key_column,
             fields,
         })
     }
@@ -566,6 +579,17 @@ type = "raw"
             parse("name='t'\n[[fields]]\nname='A'\ntype='raw'\n[[fields]]\nname='a'\ntype='raw'\n")
                 .unwrap_err();
         assert!(matches!(e, SchemaError::DuplicateField { .. }));
+    }
+
+    #[test]
+    fn key_column_is_optional_but_never_empty() {
+        let s = parse("name='t'\nkey_column='---'\n").unwrap();
+        assert_eq!(s.key_column.as_deref(), Some("---"));
+        assert_eq!(parse("name='t'\n").unwrap().key_column, None);
+        assert!(matches!(
+            parse("name='t'\nkey_column=''\n"),
+            Err(SchemaError::EmptyKeyColumn)
+        ));
     }
 
     #[test]

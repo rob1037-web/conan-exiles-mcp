@@ -44,6 +44,13 @@ pub enum StoreError {
     },
     #[error("écriture refusée: {path:?} est sous MOD_ROOT {mod_root:?}, qui est en lecture seule. Les CSV s'écrivent uniquement sous CSV_ROOT")]
     ModReadOnly { path: PathBuf, mod_root: PathBuf },
+    #[error("CSV_ROOT {csv_root:?} refusé: il est situé sous SCHEMA_ROOT {schema_root:?}, qui est en lecture seule")]
+    CsvRootInsideSchemaRoot {
+        csv_root: PathBuf,
+        schema_root: PathBuf,
+    },
+    #[error("écriture refusée: {path:?} est sous SCHEMA_ROOT {schema_root:?}, qui est en lecture seule. Les schémas ne se modifient pas par cet outil")]
+    SchemaReadOnly { path: PathBuf, schema_root: PathBuf },
     #[error("écriture refusée: {path:?} existe déjà; pour le remplacer (après sauvegarde dans .backup), confirmer explicitement avec confirm")]
     AlreadyExists { path: PathBuf },
     #[error(
@@ -79,6 +86,8 @@ impl StoreError {
             StoreError::CsvRootUnusable { .. } => "CsvRootUnusable",
             StoreError::CsvRootInsideMod { .. } => "CsvRootInsideMod",
             StoreError::ModReadOnly { .. } => "ModReadOnly",
+            StoreError::SchemaReadOnly { .. } => "SchemaReadOnly",
+            StoreError::CsvRootInsideSchemaRoot { .. } => "CsvRootInsideSchemaRoot",
             StoreError::AlreadyExists { .. } => "AlreadyExists",
             StoreError::ReservedPath { .. } => "ReservedPath",
             StoreError::BackupFailed { .. } => "BackupFailed",
@@ -100,6 +109,8 @@ pub struct CsvStore {
     csv: Sandbox,
     /// `MOD_ROOT` canonique, utilisé uniquement pour refuser les écritures.
     mod_root: PathBuf,
+    /// `SCHEMA_ROOT` (canonique si possible), lecture seule, même rôle que `mod_root`.
+    schema_root: Option<PathBuf>,
 }
 
 impl CsvStore {
@@ -127,6 +138,19 @@ impl CsvStore {
                 mod_root,
             });
         }
+        let schema_root = config
+            .schema_root
+            .as_deref()
+            .filter(|p| !p.as_os_str().is_empty())
+            .and_then(|p| canonicalize_lenient(p).ok());
+        if let Some(schema_root) = &schema_root {
+            if planned.starts_with(schema_root) {
+                return Err(StoreError::CsvRootInsideSchemaRoot {
+                    csv_root: config.csv_root.clone(),
+                    schema_root: schema_root.clone(),
+                });
+            }
+        }
         std::fs::create_dir_all(&config.csv_root).map_err(|source| StoreError::Io {
             path: config.csv_root.clone(),
             source,
@@ -138,7 +162,11 @@ impl CsvStore {
                 mod_root,
             });
         }
-        Ok(CsvStore { csv, mod_root })
+        Ok(CsvStore {
+            csv,
+            mod_root,
+            schema_root,
+        })
     }
 
     /// `CSV_ROOT` canonique.
@@ -146,7 +174,7 @@ impl CsvStore {
         self.csv.root()
     }
 
-    /// Refuse tout chemin sous `MOD_ROOT`. À appeler avant toute écriture sur un chemin
+    /// Refuse tout chemin sous `MOD_ROOT` ou `SCHEMA_ROOT` (lecture seule). À appeler avant toute écriture sur un chemin
     /// déjà résolu.
     pub fn guard_write(&self, path: &Path) -> Result<(), StoreError> {
         if path.starts_with(&self.mod_root) {
@@ -154,6 +182,14 @@ impl CsvStore {
                 path: path.to_path_buf(),
                 mod_root: self.mod_root.clone(),
             });
+        }
+        if let Some(schema_root) = &self.schema_root {
+            if path.starts_with(schema_root) {
+                return Err(StoreError::SchemaReadOnly {
+                    path: path.to_path_buf(),
+                    schema_root: schema_root.clone(),
+                });
+            }
         }
         Ok(())
     }
@@ -263,14 +299,14 @@ impl CsvStore {
         }
         let target = match self.csv.resolve_write(rel) {
             Ok(p) => p,
-            // Un lien ou une jonction qui mène dans le mod : message explicite « mod ».
-            Err(SandboxError::Escapes { resolved, .. }) if resolved.starts_with(&self.mod_root) => {
-                return Err(StoreError::ModReadOnly {
-                    path: resolved,
-                    mod_root: self.mod_root.clone(),
-                });
+            Err(e) => {
+                // Un lien ou une jonction qui mène dans une racine en lecture seule (mod,
+                // schémas): message explicite plutôt qu'une simple évasion.
+                if let SandboxError::Escapes { resolved, .. } = &e {
+                    self.guard_write(resolved)?;
+                }
+                return Err(e.into());
             }
-            Err(e) => return Err(e.into()),
         };
         self.guard_write(&target)?;
 
@@ -744,6 +780,58 @@ mod tests {
             s.read_csv("big.csv"),
             Err(StoreError::TooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn schema_root_is_read_only_for_the_store() {
+        let e = env();
+        let schema_root = e.csv_root.join("schemas"); // SCHEMA_ROOT sous CSV_ROOT: écrasable par erreur
+        fs::create_dir_all(&schema_root).unwrap();
+        fs::write(schema_root.join("DT_X.toml"), "name = \"DT_X\"\n").unwrap();
+        let cfg = Config::new(&e.mod_root, Some(e.csv_root.clone())).with_schema_root(&schema_root);
+        let s = CsvStore::open(&cfg).unwrap();
+        let before = tree(&schema_root);
+        for rel in [
+            "schemas/DT_X.toml",
+            "schemas/new.toml",
+            "schemas/sub/new.csv",
+        ] {
+            let err = s.write_csv(rel, b"---\n", confirmed()).unwrap_err();
+            assert!(
+                matches!(err, StoreError::SchemaReadOnly { .. }),
+                "{rel}: {err}"
+            );
+            assert!(err.to_string().contains("lecture seule"));
+        }
+        assert_eq!(tree(&schema_root), before);
+        assert!(!schema_root.join("sub").exists());
+        // hors de SCHEMA_ROOT, l'écriture reste possible
+        assert!(s
+            .write_csv("ok.csv", b"---\n", WriteOptions::default())
+            .is_ok());
+    }
+
+    #[test]
+    fn csv_root_inside_schema_root_is_refused_and_unconfigured_schema_root_is_fine() {
+        let e = env();
+        let schema_root = e.mod_root.parent().unwrap().join("schemas");
+        fs::create_dir_all(&schema_root).unwrap();
+        let inside = schema_root.join("csv");
+        let cfg = Config::new(&e.mod_root, Some(inside.clone())).with_schema_root(&schema_root);
+        assert!(matches!(
+            CsvStore::open(&cfg),
+            Err(StoreError::CsvRootInsideSchemaRoot { .. })
+        ));
+        assert!(!inside.exists());
+        // SCHEMA_ROOT absent, vide ou inexistant: n'empêche pas d'ouvrir le magasin
+        for cfg in [
+            Config::new(&e.mod_root, Some(e.csv_root.clone())),
+            Config::new(&e.mod_root, Some(e.csv_root.clone())).with_schema_root(""),
+            Config::new(&e.mod_root, Some(e.csv_root.clone()))
+                .with_schema_root(e._tmp.path().join("absent")),
+        ] {
+            assert!(CsvStore::open(&cfg).is_ok());
+        }
     }
 
     #[test]
