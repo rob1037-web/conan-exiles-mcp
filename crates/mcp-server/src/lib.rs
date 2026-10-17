@@ -104,6 +104,18 @@ fn guarded<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     })
 }
 
+/// Chemin affichable: sans le préfixe verbatim `\\?\` que Windows ajoute aux chemins canoniques.
+fn pretty(path: &std::path::Path) -> String {
+    let s = path.display().to_string();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        s
+    }
+}
+
 fn newline_name(n: Newline) -> &'static str {
     match n {
         Newline::Lf => "LF",
@@ -142,7 +154,7 @@ impl ConanServer {
             let listing = listing.map_err(|e| error_text(&e))?;
             Ok(CallToolResult::structured(json!({
                 "source": p.source.name(),
-                "root": root.display().to_string(),
+                "root": pretty(root),
                 "count": listing.entries.len(),
                 "truncated": listing.truncated,
                 "files": listing.entries.iter()
@@ -252,13 +264,13 @@ impl ConanServer {
                 } else {
                     "nouveau"
                 },
-                outcome.path.display(),
+                pretty(&outcome.path),
                 outcome.diff.render(),
             );
             if let (Some(b), Some(rel)) = (&outcome.backup, &backup_rel) {
                 report.push_str(&format!(
                     "Sauvegarde créée: {rel}\nChemin réel de la sauvegarde: {}\n",
-                    b.display()
+                    pretty(b)
                 ));
             }
             if !outcome.applied && !outcome.unchanged {
@@ -280,13 +292,13 @@ fn structured_write(
 ) -> Value {
     json!({
         "path": path,
-        "real_path": outcome.path.display().to_string(),
+        "real_path": pretty(&outcome.path),
         "existed": outcome.existed,
         "applied": outcome.applied,
         "unchanged": outcome.unchanged,
         "dry_run": !outcome.applied && !outcome.unchanged,
         "backup": backup_rel,
-        "backup_real_path": outcome.backup.as_ref().map(|b| b.display().to_string()),
+        "backup_real_path": outcome.backup.as_ref().map(|b| pretty(b)),
         "diff": {
             "added": outcome.diff.added.len(),
             "modified": outcome.diff.modified.len(),
@@ -426,6 +438,13 @@ mod tests {
             assert!(text.starts_with(&format!("ERREUR {code}: ")), "{text}");
             assert!(text.len() > code.len() + 20, "message trop pauvre: {text}");
         }
+    }
+
+    #[test]
+    fn verbatim_prefixes_are_hidden_from_displayed_paths() {
+        assert_eq!(pretty(&p(r"\\?\D:\ConanMod\csv")), r"D:\ConanMod\csv");
+        assert_eq!(pretty(&p(r"\\?\UNC\srv\share\x")), r"\\srv\share\x");
+        assert_eq!(pretty(&p("/home/x")), "/home/x");
     }
 
     #[test]
