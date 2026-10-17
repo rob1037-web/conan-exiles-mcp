@@ -48,18 +48,18 @@ fixtures/      # exports réels du Devkit pour les tests
 ## Checklist (chef de projet : Robin)
 
 ### Phase 0 — Décisions et vérifications (Robin, avant tout code)
-- [ ] Choisir **une** première DataTable de test (type d'item, recette…)
-- [ ] L'exporter depuis le Devkit en CSV **et** JSON → `fixtures/`
+- [x] Choisir **une** première DataTable de test (type d'item, recette…)
+- [ ] L'exporter depuis le Devkit en CSV **et** JSON → `fixtures/` — CSV fait (`DT_LightningRodLoot_Common.csv`), JSON non fourni
 - [ ] Identifier le dossier du mod qui servira de `MOD_ROOT`
 - [ ] Optionnel : lancer le Devkit en ligne de commande avec `-help` / `-run=ImportAssets` pour savoir si les commandlets existent (piste pour automatiser le réimport plus tard)
 
 ### Phase 1 — `core` sans MCP
-- [ ] Workspace Cargo avec les 2 crates
-- [ ] Parser de schéma TOML (string, int, float, bool, enum, référence d'asset, champ requis/optionnel, bornes)
-- [ ] Validation d'une ligne, avec messages d'erreur précis
-- [ ] Lecture/écriture CSV au format exact des DataTables Unreal (la première colonne est la clé de ligne ; son en-tête est lu dans le fichier, `---` dans les exports observés, jamais supposé)
-- [ ] Test de round-trip : relire le fixture, le réécrire, obtenir un résultat identique à l'octet près
-- [ ] Sandbox de chemins + tests d'évasion (`..`, absolu, symlink)
+- [x] Workspace Cargo avec les 2 crates
+- [x] Parser de schéma TOML (string, int, float, bool, enum, référence d'asset, champ requis/optionnel, bornes)
+- [x] Validation d'une ligne, avec messages d'erreur précis
+- [x] Lecture/écriture CSV au format exact des DataTables Unreal (la première colonne est la clé de ligne ; son en-tête est lu dans le fichier, `---` dans les exports observés, jamais supposé)
+- [x] Test de round-trip : relire le fixture, le réécrire, obtenir un résultat identique à l'octet près
+- [x] Sandbox de chemins + tests d'évasion (`..`, absolu, symlink)
 
 ### Phase 2 — Serveur MCP
 - [ ] Serveur `rmcp` en stdio avec les 6 outils
