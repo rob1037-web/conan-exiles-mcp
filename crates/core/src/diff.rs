@@ -2,8 +2,12 @@
 //!
 //! Les lignes sont appariées par leur clé (première cellule). Si une clé apparaît
 //! plusieurs fois, les occurrences sont appariées dans l'ordre. L'ordre des lignes n'est
-//! pas une différence de contenu (signalé à part par `order_changed`, pour les lignes communes) : seuls l'en-tête, le contenu des cellules (texte et quoting) et le
-//! format du fichier (BOM, fins de ligne, retour final) le sont.
+//! pas une différence de contenu (signalé à part par `order_changed`, pour les lignes communes).
+//!
+//! Le diff compare les **valeurs après parsing CSV** (le texte des cellules), pas le texte brut :
+//! la présence ou l'absence de guillemets n'est jamais un changement de valeur (signalée à part
+//! par `quoting_changed`). Le format du fichier (BOM, fins de ligne, retour final) est signalé
+//! par `format_changed`.
 
 use std::collections::HashMap;
 
@@ -23,8 +27,6 @@ pub struct ColumnChange {
     pub column: String,
     pub before: String,
     pub after: String,
-    /// Seul le quoting change, pas le texte.
-    pub quoting_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,8 +37,10 @@ pub struct ModifiedRow {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TableDiff {
-    /// L'en-tête (texte ou quoting) diffère. Toujours `false` pour un fichier créé.
+    /// Le texte de l'en-tête diffère. Toujours `false` pour un fichier créé.
     pub header_changed: bool,
+    /// Des cellules ont la même valeur mais pas les mêmes guillemets (aucun changement de valeur).
+    pub quoting_changed: bool,
     /// BOM, type de fin de ligne ou retour final différent.
     pub format_changed: bool,
     /// Les lignes sont dans un autre ordre (sans que cela change leur contenu).
@@ -56,7 +60,8 @@ impl TableDiff {
             };
         };
         let mut diff = TableDiff {
-            header_changed: old.header.cells != new.header.cells,
+            header_changed: !same_texts(&old.header.cells, &new.header.cells),
+            quoting_changed: quoting_differs(old, new),
             format_changed: old.bom != new.bom
                 || old.newline != new.newline
                 || old.final_newline != new.final_newline,
@@ -108,6 +113,7 @@ impl TableDiff {
     pub fn is_empty(&self) -> bool {
         !self.header_changed
             && !self.format_changed
+            && !self.quoting_changed
             && !self.order_changed
             && self.added.is_empty()
             && self.removed.is_empty()
@@ -128,11 +134,42 @@ impl TableDiff {
         if self.order_changed {
             s.push_str(", ordre des lignes modifié");
         }
+        if self.quoting_changed {
+            s.push_str(", guillemets normalisés (valeurs identiques)");
+        }
         if self.format_changed {
             s.push_str(", format du fichier modifié (BOM, fins de ligne ou retour final)");
         }
         s
     }
+}
+
+fn same_texts(a: &[CsvCell], b: &[CsvCell]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.text == y.text)
+}
+
+/// Une cellule (en-tête ou ligne appariée par clé et par rang) a la même valeur mais d'autres guillemets.
+fn quoting_differs(old: &Table, new: &Table) -> bool {
+    let differs = |a: &[CsvCell], b: &[CsvCell]| {
+        a.iter()
+            .zip(b)
+            .any(|(x, y)| x.text == y.text && x.quoted != y.quoted)
+    };
+    if differs(&old.header.cells, &new.header.cells) {
+        return true;
+    }
+    let mut by_key: HashMap<&str, Vec<&CsvRecord>> = HashMap::new();
+    for r in &old.rows {
+        by_key.entry(&r.cells[0].text).or_default().push(r);
+    }
+    let mut used: HashMap<&str, usize> = HashMap::new();
+    new.rows.iter().any(|r| {
+        let key = r.cells[0].text.as_str();
+        let n = used.entry(key).or_insert(0);
+        let before = by_key.get(key).and_then(|v| v.get(*n));
+        *n += 1;
+        before.is_some_and(|b| differs(&b.cells, &r.cells))
+    })
 }
 
 /// L'ordre relatif des lignes présentes dans les deux versions diffère.
@@ -187,13 +224,7 @@ impl TableDiff {
                 let changes: Vec<String> = r
                     .changes
                     .iter()
-                    .map(|c| {
-                        if c.quoting_only {
-                            format!("{}: {:?} (guillemets seuls)", c.column, c.after)
-                        } else {
-                            format!("{}: {:?} -> {:?}", c.column, c.before, c.after)
-                        }
-                    })
+                    .map(|c| format!("{}: {:?} -> {:?}", c.column, c.before, c.after))
                     .collect();
                 out.push_str(&format!("  ~ {} | {}\n", r.key, changes.join("; ")));
             }
@@ -221,7 +252,7 @@ fn cell_changes(header: &[CsvCell], before: &[CsvCell], after: &[CsvCell]) -> Ve
     let mut out = Vec::new();
     for i in 0..before.len().max(after.len()) {
         let (b, a) = (before.get(i), after.get(i));
-        if b == a {
+        if b.map(|c| &c.text) == a.map(|c| &c.text) {
             continue;
         }
         out.push(ColumnChange {
@@ -230,7 +261,6 @@ fn cell_changes(header: &[CsvCell], before: &[CsvCell], after: &[CsvCell]) -> Ve
                 .map_or_else(|| format!("#{i}"), |h| h.text.clone()),
             before: b.map_or_else(String::new, |c| c.text.clone()),
             after: a.map_or_else(String::new, |c| c.text.clone()),
-            quoting_only: matches!((b, a), (Some(b), Some(a)) if b.text == a.text),
         });
     }
     out
@@ -272,7 +302,6 @@ mod tests {
                 column: "A".into(),
                 before: "y".into(),
                 after: "Y".into(),
-                quoting_only: false
             }]
         );
         assert!(!d.header_changed && !d.format_changed && !d.is_empty());
@@ -292,11 +321,40 @@ mod tests {
     fn quoting_header_and_format_changes_are_reported() {
         let old = t("---,A\n1,\"x\"\n");
         let d = TableDiff::between(Some(&old), &t("---,A\n1,x\n"));
-        assert!(d.modified[0].changes[0].quoting_only);
+        // même valeur, guillemets différents: PAS une modification, signalé à part
+        assert!(d.modified.is_empty() && d.added.is_empty() && d.removed.is_empty());
+        assert!(d.quoting_changed && !d.is_empty());
+        assert!(d.summary().contains("guillemets normalisés"));
         let d = TableDiff::between(Some(&old), &t("---,B\n1,\"x\"\n"));
         assert!(d.header_changed);
         let d = TableDiff::between(Some(&old), &t("---,A\r\n1,\"x\"\r\n"));
         assert!(d.format_changed && d.added.is_empty() && d.modified.is_empty());
+    }
+
+    #[test]
+    fn only_real_value_changes_are_reported_whatever_the_quoting() {
+        let old = t("---,A,B\n1,\"x\",\"10\"\n2,\"y\",\"20\"\n");
+        // aucun guillemet, une seule vraie modification (2/B)
+        let new = t("---,A,B\n1,x,10\n2,y,21\n");
+        let d = TableDiff::between(Some(&old), &new);
+        assert!(d.added.is_empty() && d.removed.is_empty() && !d.header_changed);
+        assert_eq!(d.modified.len(), 1);
+        assert_eq!(d.modified[0].key, "2");
+        assert_eq!(
+            d.modified[0].changes,
+            [ColumnChange {
+                column: "B".into(),
+                before: "20".into(),
+                after: "21".into()
+            }]
+        );
+        assert!(d.quoting_changed);
+        // en-tête entre guillemets: même valeur, pas de changement d'en-tête
+        let d = TableDiff::between(
+            Some(&old),
+            &t("\"---\",\"A\",\"B\"\n1,\"x\",\"10\"\n2,\"y\",\"20\"\n"),
+        );
+        assert!(!d.header_changed && d.quoting_changed && d.modified.is_empty());
     }
 
     #[test]

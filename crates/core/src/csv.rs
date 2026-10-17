@@ -397,7 +397,77 @@ fn validate_header(schema: &Schema, table: &Table) -> Vec<ValidationError> {
     errors
 }
 
+/// Écrit un flottant comme le Devkit l'exporte (six décimales: `10` -> `10.000000`), seulement
+/// si la valeur reste exactement la même ; sinon (plus de six décimales significatives) le texte
+/// d'origine est conservé tel quel, jamais arrondi.
+fn six_decimals(text: &str) -> String {
+    let Ok(value) = text.parse::<f64>() else {
+        return text.to_owned();
+    };
+    let formatted = format!("{value:.6}");
+    match formatted.parse::<f64>() {
+        Ok(back) if value.is_finite() && back == value => formatted,
+        _ => text.to_owned(),
+    }
+}
+
 impl Table {
+    /// Met la table au format des exports du Devkit, quel que soit le format reçu:
+    /// en-tête et clés de ligne sans guillemets, valeurs entre guillemets, flottants à six
+    /// décimales (champs `float` du schéma, sans jamais arrondir), fins de ligne LF, sans BOM,
+    /// avec retour final. Les valeurs ne changent pas (hors écriture des flottants).
+    /// Tolérant: une table invalide est mise en forme au mieux, sans erreur.
+    pub fn to_devkit_format(&self, schema: &Schema) -> Table {
+        let is_float: Vec<bool> = self
+            .header
+            .cells
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                i > 0
+                    && schema
+                        .field(&h.text)
+                        .is_some_and(|f| matches!(f.ty, crate::schema::FieldType::Float { .. }))
+            })
+            .collect();
+        let plain = |c: &CsvCell| CsvCell {
+            text: c.text.clone(),
+            quoted: false,
+        };
+        Table {
+            bom: false,
+            newline: Newline::Lf,
+            final_newline: true,
+            header: CsvRecord {
+                line: self.header.line,
+                cells: self.header.cells.iter().map(plain).collect(),
+            },
+            rows: self
+                .rows
+                .iter()
+                .map(|r| CsvRecord {
+                    line: r.line,
+                    cells: r
+                        .cells
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| match i {
+                            0 => plain(c),
+                            _ if is_float.get(i) == Some(&true) && !c.text.is_empty() => CsvCell {
+                                text: six_decimals(&c.text),
+                                quoted: true,
+                            },
+                            _ => CsvCell {
+                                text: c.text.clone(),
+                                quoted: true,
+                            },
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
     /// Construit une table à partir de lignes de texte `[clé, valeur par colonne du schéma…]`,
     /// avec la convention des exports Devkit (en-tête et clés non quotés, valeurs quotées, LF,
     /// retour final). Un nombre de valeurs incorrect est signalé (`Rule::ColumnCount`) pour

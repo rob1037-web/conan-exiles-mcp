@@ -498,7 +498,8 @@ impl ConanServer {
                 }
                 Err(e) => return Err(error_text(&e)),
             };
-            let (outcome, validation) = (written.outcome, written.report);
+            let (outcome, validation, normalized) =
+                (written.outcome, written.report, written.normalized);
 
             let backup_rel = outcome.backup.as_ref().map(|b| {
                 b.strip_prefix(self.store.csv_root())
@@ -543,6 +544,13 @@ impl ConanServer {
                     report_text(&validation),
                 ));
             }
+            if normalized {
+                report.push_str(
+                    "Format: le contenu reçu a été remis au format du Devkit (en-tête et clés sans guillemets, \
+                     valeurs entre guillemets, flottants à six décimales, LF) avant comparaison et écriture; \
+                     le diff ne montre que les changements de valeur.\n",
+                );
+            }
             if let (Some(b), Some(rel)) = (&outcome.backup, &backup_rel) {
                 report.push_str(&format!(
                     "Sauvegarde créée: {rel}\nChemin réel de la sauvegarde: {}\n",
@@ -558,6 +566,7 @@ impl ConanServer {
             let mut structured = structured_write(&path, &outcome, backup_rel);
             structured["table"] = json!(schema.name);
             structured["valid"] = json!(validation.is_empty());
+            structured["normalized"] = json!(normalized);
             structured["schema_drift"] = json!(validation.iter().any(|e| e.rule.is_schema_drift()));
             structured["validation_errors"] =
                 json!(validation.iter().map(error_json).collect::<Vec<_>>());

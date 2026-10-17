@@ -293,7 +293,8 @@ impl CsvStore {
     /// - **écriture réelle**: refusée avec `ValidationFailed` si le rapport n'est pas vide;
     ///   sinon mêmes règles que `write_csv` (confirm, sauvegarde, écriture atomique).
     ///
-    /// Aucun mode « forcer ».
+    /// Le contenu est remis au format des exports du Devkit avant comparaison et écriture
+    /// (`Table::to_devkit_format`). Aucun mode « forcer ».
     pub fn write_with_schema(
         &self,
         schema: &Schema,
@@ -309,8 +310,16 @@ impl CsvStore {
                 errors: report,
             });
         }
-        let outcome = self.write_csv(rel, bytes, options)?;
-        Ok(SchemaWrite { outcome, report })
+        // Le fichier écrit (et comparé à l'existant) est toujours au format du Devkit, quel que
+        // soit le format reçu: le diff ne montre alors que les vrais changements de valeur.
+        let canonical = table.to_devkit_format(schema).to_bytes();
+        let normalized = canonical != bytes;
+        let outcome = self.write_csv(rel, &canonical, options)?;
+        Ok(SchemaWrite {
+            outcome,
+            normalized,
+            report,
+        })
     }
 
     /// Écrit un CSV sous `CSV_ROOT` (dossiers intermédiaires créés au besoin, sauf en
@@ -405,6 +414,8 @@ impl CsvStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaWrite {
     pub outcome: WriteOutcome,
+    /// Le contenu reçu a été remis au format du Devkit (guillemets, décimales, fins de ligne).
+    pub normalized: bool,
     /// Erreurs de validation. Toujours vide pour une écriture réelle réussie ; en dry-run,
     /// peut être non vide (l'écriture réelle serait alors refusée).
     pub report: Vec<ValidationError>,

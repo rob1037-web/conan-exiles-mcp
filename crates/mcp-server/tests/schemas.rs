@@ -569,3 +569,67 @@ async fn recette_valid_dry_run_then_invalid_dry_run_then_real_write() {
     let r = s.call("validate_rows", json!({"table": TABLE})).await;
     assert!(text(&r).starts_with("VALIDATION OK"));
 }
+
+#[tokio::test]
+async fn values_without_quotes_give_a_diff_with_only_the_real_change_and_keep_the_file_format() {
+    let env = Env::new();
+    let s = connect(&env.config()).await;
+    write(&s, CSV_V1, Some(false), Some(true)).await;
+    let file = env.csv_root.join("DT_Purge_Nordheimer.csv");
+
+    // même table, aucun guillemet, poids sans décimales; seule vraie modification: Trash1/Weight 10 -> 20
+    let bare = "---,SourceName,TargetName,Weight,RowType\n\
+        Trash1,Nordheimer,PurgeNew_Nordheimer_Grunt_1,20,WeightedSpawnTable\n\
+        Trash2,Nordheimer,PurgeNew_Nordheimer_Grunt_2,3,WeightedSpawnTable\n\
+        Trash3,NordheimerWolf,PurgeNew_Nordheimer_Wolf,5,WeightedSpawnTable\n\
+        Trash4,NordheimerGiant,PurgeNew_Nordheimer_FrostGiant_1,1,WeightedSpawnTable\n\
+        TrashGeneric,Nordheimer,PurgeNew_Generic_1,1,WeightedSpawnTable\n";
+
+    // dry-run: une seule ligne modifiée, un seul champ
+    let r = write(&s, bare, None, None).await;
+    assert!(!is_error(&r), "{}", text(&r));
+    let t = text(&r);
+    assert!(
+        t.contains("Résumé: 0 ajoutée(s), 1 modifiée(s), 0 supprimée(s)"),
+        "{t}"
+    );
+    assert!(
+        t.contains("~ Trash1 | Weight: \"10.000000\" -> \"20.000000\""),
+        "{t}"
+    );
+    assert!(
+        !t.contains("Trash2 |") && !t.contains("guillemets normalisés"),
+        "{t}"
+    );
+    assert!(
+        t.contains("Validation: OK") && t.contains("remis au format du Devkit"),
+        "{t}"
+    );
+    assert_eq!(structured(&r)["normalized"], true);
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        CSV_V1,
+        "dry-run: rien d'écrit"
+    );
+
+    // écriture réelle: le fichier garde le format du Devkit (clés et en-tête nus, valeurs quotées, 6 décimales)
+    let r = write(&s, bare, Some(false), Some(true)).await;
+    assert!(!is_error(&r), "{}", text(&r));
+    let written = fs::read_to_string(&file).unwrap();
+    assert_eq!(written, CSV_V1.replace("\"10.000000\"", "\"20.000000\""));
+    let backup = structured(&r)["backup_real_path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(fs::read_to_string(backup).unwrap(), CSV_V1);
+
+    // le même contenu dans un autre format n'est plus une modification
+    let r = write(&s, &written.replace('"', ""), Some(false), Some(true)).await;
+    assert!(text(&r).starts_with("AUCUN CHANGEMENT"), "{}", text(&r));
+    assert_eq!(fs::read_to_string(&file).unwrap(), written);
+
+    // et un contenu déjà au bon format n'est pas signalé comme normalisé
+    let r = write(&s, &written, None, None).await;
+    assert_eq!(structured(&r)["normalized"], false);
+    assert!(!text(&r).contains("remis au format"), "{}", text(&r));
+}

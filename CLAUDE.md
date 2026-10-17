@@ -27,15 +27,20 @@ Serveur `rmcp` en stdio, configuré par trois variables d'environnement : `MOD_R
 
 Décisions :
 - **Pas de schéma valide = pas d'écriture.** Si `SCHEMA_ROOT` est absent ou invalide, le serveur démarre, la lecture fonctionne, toute écriture (dry-run compris) est refusée (`SchemaRootUnavailable`). Même refus si le schéma de la table est absent (`SchemaMissing`) ou malformé (`SchemaMalformed`).
-- **Format de schéma : TOML conservé** (pas de JSON), un fichier `<table>.toml` par DataTable dans `SCHEMA_ROOT`, `name` identique au nom de la table. Champs : `name`, `description`, `key_column` (en-tête de la colonne clé dans le CSV exporté, `---` dans les exports Devkit ; **obligatoire** dans `SCHEMA_ROOT`), puis `[[fields]]` **ordonnés** (`name`, `type` = string|int|float|bool|enum|asset_ref|raw, `required`, `values` pour enum, bornes). Voir `schemas/DT_Purge_Nordheimer.toml`.
+- **Format de schéma : TOML conservé** (pas de JSON), un fichier `<table>.toml` par DataTable dans `SCHEMA_ROOT`, `name` identique au nom de la table. Champs : `name`, `description`, `key_column` (en-tête de la colonne clé dans le CSV exporté, `---` dans les exports Devkit ; **obligatoire**, y compris dans le parseur du noyau), puis `[[fields]]` **ordonnés** (`name`, `type` = string|int|float|bool|enum|asset_ref|raw, `required`, `values` pour enum, bornes). Voir `schemas/DT_Purge_Nordheimer.toml`.
 - **Correspondance exacte des en-têtes** (noms, casse et ordre, colonne clé comprise) : tout écart est une *dérive de schéma* qui bloque l'écriture (`SchemaDrift`). Contrôles de valeurs : types, obligatoires, enums, unicité des clés (casse ASCII ignorée). Tous les écarts sont listés.
 - `write_datatable` prend un contenu CSV complet. Les opérations par ligne (ajouter, modifier, supprimer des lignes) sont prévues en Phase 3b.
 - Le format JSON (CSV/JSON) n'est pas géré à ce stade.
 - Les schémas ne sont jamais créés ni modifiés par l'outil (pas de génération automatique, pas de réparation de CSV).
 
-### Compatibilité des schémas déjà présents dans `schemas/`
-- `schemas/lightning_rod_loot.toml` et `schemas/exemple.toml` restent lisibles par le noyau (`key_column` est optionnel dans le parseur) et leurs tests passent, mais ils n'ont pas de `key_column` : **placés dans `SCHEMA_ROOT`, le serveur les refuse** (`SchemaMalformed`, « key_column obligatoire »). Migration d'une ligne : ajouter `key_column = "---"` (lightning_rod_loot, dont l'ordre des colonnes correspond déjà à l'export). Rien n'a été modifié ni supprimé en attendant l'accord.
-- `exemple.toml` est un exemple de format (types `asset_ref`, `raw`), pas une table réelle.
+### Migration des schémas (faite)
+`schemas/lightning_rod_loot.toml` et `schemas/exemple.toml` ont reçu `key_column = "---"` : un seul format, une seule règle (`SchemaError::MissingKeyColumn` si absent). Tous les schémas versionnés se chargent dans un `SCHEMA_ROOT` (test).
+
+### Format du fichier écrit
+`write_datatable` remet toujours le contenu reçu au **format des exports du Devkit** avant comparaison et écriture (`Table::to_devkit_format`) : en-tête et clés sans guillemets, valeurs entre guillemets, flottants à six décimales (jamais d'arrondi), LF, sans BOM, retour final. Le diff compare les **valeurs après parsing CSV**, pas le texte brut : les guillemets ne sont jamais une modification (signalés à part, `quoting_changed`).
+
+### Vérification dans le Devkit
+Importer le CSV comme **nouvelle DataTable dans le dossier du mod**, row struct de la table, options d'import décochées, puis supprimer l'asset. Ne jamais réimporter une table de base du jeu (assets verrouillés). Voir `docs/MODE_EMPLOI.md`.
 
 ## Règles de sécurité (non négociables)
 - **Sandbox** : le serveur n'écrit que sous `CSV_ROOT` (variable d'env ; défaut `D:\ConanMod\csv`, hors du dossier du mod). Tout chemin qui en sort (`..`, chemin absolu, lien symbolique, jonction) est refusé.

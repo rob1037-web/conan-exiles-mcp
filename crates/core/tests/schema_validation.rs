@@ -441,3 +441,120 @@ fn every_versioned_schema_loads_in_a_schema_root() {
         assert_eq!(schema.key_column, "---", "{}", entry.file);
     }
 }
+
+// --- format du Devkit: le diff compare les valeurs, l'écriture reproduit le format ---------
+
+fn devkit(csv: &str) -> String {
+    let table = Table::parse(csv.as_bytes()).unwrap();
+    String::from_utf8(table.to_devkit_format(&schema()).to_bytes()).unwrap()
+}
+
+#[test]
+fn any_received_format_becomes_the_devkit_format() {
+    // l'export réel est déjà au format du Devkit
+    assert_eq!(devkit(FIXTURE), FIXTURE);
+    // aucun guillemet, entiers à la place des flottants
+    let bare = "---,SourceName,TargetName,Weight,RowType\nTrash1,Nordheimer,PurgeNew_Nordheimer_Grunt_1,10,WeightedSpawnTable\n";
+    assert_eq!(
+        devkit(bare),
+        "---,SourceName,TargetName,Weight,RowType\nTrash1,\"Nordheimer\",\"PurgeNew_Nordheimer_Grunt_1\",\"10.000000\",\"WeightedSpawnTable\"\n"
+    );
+    // tout entre guillemets, CRLF, BOM, pas de retour final
+    let messy = "\u{feff}\"---\",\"SourceName\",\"TargetName\",\"Weight\",\"RowType\"\r\n\"Trash1\",\"N\",\"T\",\"2.5\",\"WeightedSpawnTable\"";
+    assert_eq!(
+        devkit(messy),
+        "---,SourceName,TargetName,Weight,RowType\nTrash1,\"N\",\"T\",\"2.500000\",\"WeightedSpawnTable\"\n"
+    );
+}
+
+#[test]
+fn floats_are_written_with_six_decimals_but_never_rounded() {
+    let row = |w: &str| format!("{HEADER}Trash1,\"N\",\"T\",\"{w}\",\"WeightedSpawnTable\"\n");
+    let weight_of = |csv: String| {
+        let t = Table::parse(devkit(&csv).as_bytes()).unwrap();
+        t.rows[0].cells[3].text.clone()
+    };
+    assert_eq!(weight_of(row("20")), "20.000000");
+    assert_eq!(weight_of(row("0.5")), "0.500000");
+    assert_eq!(weight_of(row("-3")), "-3.000000");
+    assert_eq!(weight_of(row("1e2")), "100.000000");
+    assert_eq!(weight_of(row("10.000000")), "10.000000");
+    // plus de six décimales: conservé tel quel, jamais arrondi
+    assert_eq!(weight_of(row("0.1234567")), "0.1234567");
+    // texte invalide: laissé tel quel (la validation le signalera)
+    assert_eq!(weight_of(row("abc")), "abc");
+}
+
+#[test]
+fn diff_shows_only_the_real_change_when_values_arrive_without_quotes() {
+    let e = env();
+    let s = schema();
+    e.store
+        .write_with_schema(&s, "t.csv", FIXTURE.as_bytes(), confirmed())
+        .unwrap();
+
+    // mêmes valeurs, aucun guillemet, Trash1/Weight passe de 10 à 20 (écrit « 20 »)
+    let bare = "---,SourceName,TargetName,Weight,RowType\n\
+        Trash1,Nordheimer,PurgeNew_Nordheimer_Grunt_1,20,WeightedSpawnTable\n\
+        Trash2,Nordheimer,PurgeNew_Nordheimer_Grunt_2,3,WeightedSpawnTable\n\
+        Trash3,NordheimerWolf,PurgeNew_Nordheimer_Wolf,5,WeightedSpawnTable\n\
+        Trash4,NordheimerGiant,PurgeNew_Nordheimer_FrostGiant_1,1,WeightedSpawnTable\n\
+        TrashGeneric,Nordheimer,PurgeNew_Generic_1,1,WeightedSpawnTable\n";
+    let dry = e
+        .store
+        .write_with_schema(
+            &s,
+            "t.csv",
+            bare.as_bytes(),
+            WriteOptions {
+                dry_run: true,
+                confirm: false,
+            },
+        )
+        .unwrap();
+    assert!(dry.report.is_empty() && dry.normalized);
+    let d = &dry.outcome.diff;
+    assert!(d.added.is_empty() && d.removed.is_empty() && !d.header_changed && !d.quoting_changed);
+    assert_eq!(d.modified.len(), 1);
+    assert_eq!(d.modified[0].key, "Trash1");
+    assert_eq!(d.modified[0].changes.len(), 1);
+    assert_eq!(
+        (
+            d.modified[0].changes[0].column.as_str(),
+            d.modified[0].changes[0].before.as_str(),
+            d.modified[0].changes[0].after.as_str()
+        ),
+        ("Weight", "10.000000", "20.000000")
+    );
+    assert_eq!(d.summary(), "0 ajoutée(s), 1 modifiée(s), 0 supprimée(s)");
+
+    // l'écriture réelle garde le format d'origine
+    let out = e
+        .store
+        .write_with_schema(&s, "t.csv", bare.as_bytes(), confirmed())
+        .unwrap();
+    assert!(out.outcome.applied && out.normalized);
+    let written = std::fs::read_to_string(e.csv_root.join("t.csv")).unwrap();
+    assert_eq!(written, FIXTURE.replace("\"10.000000\"", "\"20.000000\""));
+    assert_eq!(
+        std::fs::read_to_string(out.outcome.backup.unwrap()).unwrap(),
+        FIXTURE
+    );
+
+    // renvoyer le même contenu, quel que soit son format: aucun changement
+    let again = e
+        .store
+        .write_with_schema(&s, "t.csv", bare.as_bytes(), confirmed())
+        .unwrap();
+    assert!(again.outcome.unchanged && !again.outcome.applied && again.outcome.backup.is_none());
+}
+
+#[test]
+fn a_canonical_input_is_not_reported_as_normalized() {
+    let e = env();
+    let out = e
+        .store
+        .write_with_schema(&schema(), "t.csv", FIXTURE.as_bytes(), confirmed())
+        .unwrap();
+    assert!(!out.normalized);
+}

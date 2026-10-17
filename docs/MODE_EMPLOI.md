@@ -44,7 +44,7 @@ Un fichier `.toml` par DataTable dans `SCHEMA_ROOT`, **nommé d'après la table*
 À partir de l'export CSV réel du Devkit :
 
 1. L'en-tête de la première colonne (la clé de ligne, « Row Name ») est copié dans `key_column`
-   (`---` dans les exports observés).
+   (`---` dans les exports observés). **`key_column` est obligatoire.**
 2. Chaque autre colonne de l'en-tête devient un bloc `[[fields]]`, **dans le même ordre**.
 3. Le type de chaque colonne se déduit des valeurs de l'export (jamais d'autre source).
 
@@ -120,7 +120,30 @@ Demandez à Claude, par exemple : « Ajoute une ligne Trash5 à DT_Purge_Nordhei
 6. **`write_datatable`** avec `dry_run=false` **et** `confirm=true` : écrit. Si le fichier
    existait, il est d'abord sauvegardé dans `CSV_ROOT\.backup\` (horodaté), puis remplacé de façon
    atomique. Le chemin de la sauvegarde est renvoyé.
-7. **Import manuel** dans le Devkit, comme d'habitude.
+7. **Import manuel** dans le Devkit, comme d'habitude (voir la section suivante pour une
+   vérification sans risque).
+
+### Vérifier un CSV en l'important dans le Devkit
+
+Pour contrôler qu'un CSV écrit est bien lu par le Devkit **sans toucher à un asset existant** :
+
+1. Dans le Devkit, importez le CSV **comme nouvelle DataTable dans le dossier du mod** (le dossier
+   de `MOD_ROOT`), avec le row struct de la table (ici `PurgeEnemyMapRow`) et **toutes les options
+   d'import décochées**.
+2. Vérifiez les lignes, les valeurs et la reconnaissance des enums.
+3. Supprimez ensuite l'asset de test.
+
+**On ne réimporte jamais une table de base du jeu** : ses assets sont verrouillés et ne doivent
+pas être remplacés. L'import de vérification se fait toujours dans le dossier du mod, vers un
+nouvel asset.
+
+**Format du fichier écrit.** Le contenu reçu est toujours remis au format des exports du Devkit
+avant comparaison et écriture : en-tête et clés de ligne sans guillemets, valeurs entre
+guillemets, flottants à six décimales (`20` devient `"20.000000"`, sans jamais arrondir une valeur
+qui aurait plus de six décimales), fins de ligne LF, sans BOM, avec retour final. Claude n'a donc
+pas à reproduire le format exact : le diff compare les **valeurs**, jamais les guillemets, et ne
+montre que les vrais changements. Le rapport indique « Format : le contenu reçu a été remis au
+format du Devkit » quand c'est arrivé.
 
 Garde-fous : l'écriture réelle est refusée si le schéma est absent, malformé, si l'en-tête ne
 correspond pas, ou si une seule valeur est invalide. **Il n'existe aucun mode « forcer ».** Un
