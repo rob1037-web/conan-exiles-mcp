@@ -10,7 +10,7 @@
 //! Tout le reste est une erreur, jamais une correction silencieuse.
 
 use crate::schema::Schema;
-use crate::validate::{validate_row, ValidationError};
+use crate::validate::{validate_row, Rule, ValidationError};
 use crate::value::{RawRow, Row};
 
 const BOM: char = '\u{feff}';
@@ -267,43 +267,15 @@ fn write_cell(out: &mut String, cell: &CsvCell) {
     }
 }
 
-/// Valide toute la table : l'en-tête d'abord (colonnes inconnues, colonnes du schéma
-/// absentes), puis chaque ligne. Renvoie toutes les erreurs trouvées.
+/// Valide toute la table contre le schéma et renvoie **toutes** les erreurs trouvées.
+///
+/// 1. L'en-tête doit correspondre exactement au schéma: colonne clé (`key_column` si
+///    déclaré), puis les colonnes du schéma, mêmes noms, même ordre, sans doublon. Tout écart
+///    est une dérive de schéma (`Rule::is_schema_drift`); les lignes ne sont alors pas validées.
+/// 2. Chaque ligne: types, bornes, champs obligatoires, valeurs d'enum.
+/// 3. Les clés de ligne sont uniques (casse ASCII ignorée, comme les FName).
 pub fn validate_table(schema: &Schema, table: &Table) -> Result<Vec<Row>, Vec<ValidationError>> {
-    let mut errors = Vec::new();
-    let columns = &table.header.cells[1..];
-    let line = table.header.line;
-    for col in columns {
-        if schema.field(&col.text).is_none() {
-            errors.push(ValidationError {
-                line,
-                column: Some(col.text.clone()),
-                received: Some(col.text.clone()),
-                expected: format!(
-                    "une colonne du schéma '{}': {}",
-                    schema.name,
-                    schema
-                        .fields
-                        .iter()
-                        .map(|f| f.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            });
-        }
-    }
-    // Le Devkit exporte tous les champs de la struct : une colonne du schéma absente de
-    // l'en-tête (requise ou non) signifie que le schéma ne correspond pas à l'export.
-    for field in &schema.fields {
-        if !columns.iter().any(|c| c.text == field.name) {
-            errors.push(ValidationError {
-                line,
-                column: Some(field.name.clone()),
-                received: None,
-                expected: "cette colonne dans l'en-tête (le Devkit exporte tous les champs: le schéma ne correspond pas à ce fichier)".into(),
-            });
-        }
-    }
+    let mut errors = validate_header(schema, table);
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -314,10 +286,188 @@ pub fn validate_table(schema: &Schema, table: &Table) -> Result<Vec<Row>, Vec<Va
             Err(mut e) => errors.append(&mut e),
         }
     }
+    let mut first_seen: std::collections::HashMap<String, (usize, String)> =
+        std::collections::HashMap::new();
+    for rec in &table.rows {
+        let key = &rec.cells[0].text;
+        if key.trim().is_empty() {
+            continue; // déjà signalée par la validation de ligne
+        }
+        match first_seen.get(&key.to_ascii_lowercase()) {
+            Some((line, original)) => errors.push(ValidationError {
+                line: rec.line,
+                key: Some(key.clone()),
+                column: None,
+                received: Some(key.clone()),
+                rule: Rule::DuplicateKey,
+                expected: format!(
+                    "une clé unique (déjà utilisée ligne {line} par '{original}'; casse ASCII ignorée)"
+                ),
+            }),
+            None => {
+                first_seen.insert(key.to_ascii_lowercase(), (rec.line, key.clone()));
+            }
+        }
+    }
+    errors.sort_by_key(|e| e.line);
     if errors.is_empty() {
         Ok(rows)
     } else {
         Err(errors)
+    }
+}
+
+fn validate_header(schema: &Schema, table: &Table) -> Vec<ValidationError> {
+    let line = table.header.line;
+    let mut errors = Vec::new();
+    let mut drift = |rule, column: Option<&str>, received: Option<&str>, expected: String| {
+        errors.push(ValidationError {
+            line,
+            key: None,
+            column: column.map(str::to_owned),
+            received: received.map(str::to_owned),
+            rule,
+            expected,
+        });
+    };
+    if let Some(expected_key) = &schema.key_column {
+        let got = &table.header.cells[0].text;
+        if got != expected_key {
+            drift(
+                Rule::KeyHeaderMismatch,
+                None,
+                Some(got),
+                format!("{expected_key:?} comme en-tête de la colonne clé (key_column)"),
+            );
+        }
+    }
+    let columns: Vec<&str> = table.header.cells[1..]
+        .iter()
+        .map(|c| c.text.as_str())
+        .collect();
+    let expected: Vec<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
+    let mut structural = false;
+    for (i, col) in columns.iter().enumerate() {
+        if columns[..i].contains(col) {
+            structural = true;
+            drift(
+                Rule::DuplicateColumn,
+                Some(col),
+                Some(col),
+                "une seule colonne de ce nom dans l'en-tête".into(),
+            );
+        } else if !expected.contains(col) {
+            structural = true;
+            drift(
+                Rule::UnknownColumn,
+                Some(col),
+                Some(col),
+                format!(
+                    "une colonne du schéma '{}': {} (dérive de schéma: l'export contient une colonne inconnue)",
+                    schema.name,
+                    expected.join(", ")
+                ),
+            );
+        }
+    }
+    // Le Devkit exporte tous les champs de la struct: une colonne du schéma absente de
+    // l'en-tête (requise ou non) signifie que le schéma ne correspond pas à ce fichier.
+    for name in &expected {
+        if !columns.contains(name) {
+            structural = true;
+            drift(
+                Rule::MissingColumn,
+                Some(name),
+                None,
+                "cette colonne dans l'en-tête (le Devkit exporte tous les champs: dérive de schéma)".into(),
+            );
+        }
+    }
+    if !structural && columns != expected {
+        drift(
+            Rule::ColumnOrder,
+            None,
+            Some(&columns.join(", ")),
+            format!(
+                "les colonnes dans l'ordre du schéma: {}",
+                expected.join(", ")
+            ),
+        );
+    }
+    errors
+}
+
+impl Table {
+    /// Construit une table à partir de lignes de texte `[clé, valeur par colonne du schéma…]`,
+    /// avec la convention des exports Devkit (en-tête et clés non quotés, valeurs quotées, LF,
+    /// retour final). Un nombre de valeurs incorrect est signalé (`Rule::ColumnCount`) pour
+    /// toutes les lignes concernées. Les numéros de ligne suivent ceux d'un CSV: 1 = en-tête.
+    pub fn for_schema(
+        schema: &Schema,
+        rows: &[Vec<String>],
+    ) -> Result<Table, Vec<ValidationError>> {
+        let width = schema.fields.len() + 1;
+        let errors: Vec<ValidationError> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.len() != width)
+            .map(|(i, r)| ValidationError {
+                line: i + 2,
+                key: r.first().cloned(),
+                column: None,
+                received: Some(format!("{} valeur(s)", r.len())),
+                rule: Rule::ColumnCount,
+                expected: format!(
+                    "{width} valeurs: la clé puis {}",
+                    schema
+                        .fields
+                        .iter()
+                        .map(|f| f.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            })
+            .collect();
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        let plain = |text: String| CsvCell {
+            text,
+            quoted: false,
+        };
+        let quoted = |text: String| CsvCell { text, quoted: true };
+        let header_cells =
+            std::iter::once(schema.key_column.clone().unwrap_or_else(|| "---".into()))
+                .chain(schema.fields.iter().map(|f| f.name.clone()))
+                .map(plain)
+                .collect();
+        Ok(Table {
+            bom: false,
+            newline: Newline::Lf,
+            final_newline: true,
+            header: CsvRecord {
+                line: 1,
+                cells: header_cells,
+            },
+            rows: rows
+                .iter()
+                .enumerate()
+                .map(|(i, r)| CsvRecord {
+                    line: i + 2,
+                    cells: r
+                        .iter()
+                        .enumerate()
+                        .map(|(c, v)| {
+                            if c == 0 {
+                                plain(v.clone())
+                            } else {
+                                quoted(v.clone())
+                            }
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
     }
 }
 

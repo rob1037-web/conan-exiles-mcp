@@ -6,24 +6,87 @@ use std::fmt;
 use crate::schema::{Field, FieldType, Schema};
 use crate::value::{Cell, RawRow, Row, Value};
 
-/// Une erreur de validation, lisible par une IA.
+/// Règle violée. `code()` est stable et destiné aux clients (rapports structurés).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rule {
+    /// Colonne de l'en-tête (ou de la ligne) inconnue du schéma.
+    UnknownColumn,
+    /// Colonne du schéma absente de l'en-tête (ou de la ligne).
+    MissingColumn,
+    DuplicateColumn,
+    /// Mêmes colonnes que le schéma, dans un autre ordre.
+    ColumnOrder,
+    /// L'en-tête de la colonne clé ne correspond pas à `key_column`.
+    KeyHeaderMismatch,
+    EmptyKey,
+    DuplicateKey,
+    /// Cellule vide dans un champ obligatoire.
+    RequiredEmpty,
+    WrongType,
+    OutOfRange,
+    NotInEnum,
+    /// Nombre de valeurs différent du nombre de colonnes.
+    ColumnCount,
+}
+
+impl Rule {
+    pub fn code(self) -> &'static str {
+        match self {
+            Rule::UnknownColumn => "UnknownColumn",
+            Rule::MissingColumn => "MissingColumn",
+            Rule::DuplicateColumn => "DuplicateColumn",
+            Rule::ColumnOrder => "ColumnOrder",
+            Rule::KeyHeaderMismatch => "KeyHeaderMismatch",
+            Rule::EmptyKey => "EmptyKey",
+            Rule::DuplicateKey => "DuplicateKey",
+            Rule::RequiredEmpty => "RequiredEmpty",
+            Rule::WrongType => "WrongType",
+            Rule::OutOfRange => "OutOfRange",
+            Rule::NotInEnum => "NotInEnum",
+            Rule::ColumnCount => "ColumnCount",
+        }
+    }
+
+    /// Erreur de structure (en-tête) plutôt que de valeur: le schéma ne correspond pas au fichier.
+    pub fn is_schema_drift(self) -> bool {
+        matches!(
+            self,
+            Rule::UnknownColumn
+                | Rule::MissingColumn
+                | Rule::DuplicateColumn
+                | Rule::ColumnOrder
+                | Rule::KeyHeaderMismatch
+        )
+    }
+}
+
+/// Une erreur de validation, lisible par une IA: ligne, clé de ligne, colonne, valeur reçue,
+/// règle violée et valeur attendue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationError {
     pub line: usize,
+    /// Clé de la ligne en cause ; `None` pour une erreur d'en-tête.
+    pub key: Option<String>,
     /// Colonne en cause ; `None` pour la clé de ligne (première colonne).
     pub column: Option<String>,
     /// Valeur reçue ; `None` si la colonne est absente.
     pub received: Option<String>,
+    pub rule: Rule,
     pub expected: String,
 }
 
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ligne {}, ", self.line)?;
-        match &self.column {
-            Some(c) => write!(f, "champ '{c}'")?,
-            None => write!(f, "clé de ligne")?,
+        write!(f, "ligne {}", self.line)?;
+        if let Some(k) = &self.key {
+            write!(f, " (clé {k})")?;
         }
+        match &self.column {
+            Some(c) => write!(f, ", colonne '{c}'")?,
+            None if self.key.is_some() => write!(f, ", clé de ligne")?,
+            None => {}
+        }
+        write!(f, " [{}]", self.rule.code())?;
         match &self.received {
             Some(v) => write!(f, ": reçu {v:?}")?,
             None => write!(f, ": colonne absente")?,
@@ -34,18 +97,43 @@ impl fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
+/// Rapport lisible: une ligne par erreur, au plus `limit` lignes (`0` = toutes).
+pub fn render_report(errors: &[ValidationError], limit: usize) -> String {
+    let shown = if limit == 0 {
+        errors.len()
+    } else {
+        limit.min(errors.len())
+    };
+    let mut out = String::new();
+    for e in &errors[..shown] {
+        out.push_str(&format!("  - {e}\n"));
+    }
+    if shown < errors.len() {
+        out.push_str(&format!(
+            "  … et {} autre(s) erreur(s)\n",
+            errors.len() - shown
+        ));
+    }
+    out
+}
+
 /// Valide une ligne. Renvoie la ligne typée, ou toutes les erreurs trouvées.
 pub fn validate_row(schema: &Schema, row: &RawRow) -> Result<Row, Vec<ValidationError>> {
     let mut errors = Vec::new();
-    let err = |column: Option<&str>, received: Option<&str>, expected: String| ValidationError {
-        line: row.line,
-        column: column.map(str::to_owned),
-        received: received.map(str::to_owned),
-        expected,
+    let err = |rule: Rule, column: Option<&str>, received: Option<&str>, expected: String| {
+        ValidationError {
+            line: row.line,
+            key: Some(row.key.clone()),
+            column: column.map(str::to_owned),
+            received: received.map(str::to_owned),
+            rule,
+            expected,
+        }
     };
 
     if row.key.trim().is_empty() {
         errors.push(err(
+            Rule::EmptyKey,
             None,
             Some(&row.key),
             "une clé de ligne non vide".into(),
@@ -56,6 +144,7 @@ pub fn validate_row(schema: &Schema, row: &RawRow) -> Result<Row, Vec<Validation
     for (i, (col, raw)) in row.cells.iter().enumerate() {
         if row.cells[..i].iter().any(|(c, _)| c == col) {
             errors.push(err(
+                Rule::DuplicateColumn,
                 Some(col),
                 Some(raw),
                 "une seule cellule par colonne".into(),
@@ -70,6 +159,7 @@ pub fn validate_row(schema: &Schema, row: &RawRow) -> Result<Row, Vec<Validation
                 .unwrap_or_default();
             let known: Vec<_> = schema.fields.iter().map(|f| f.name.as_str()).collect();
             errors.push(err(
+                Rule::UnknownColumn,
                 Some(col),
                 Some(raw),
                 format!(
@@ -93,7 +183,7 @@ pub fn validate_row(schema: &Schema, row: &RawRow) -> Result<Row, Vec<Validation
                 raw: raw.clone(),
                 value,
             }),
-            Err(expected) => errors.push(err(Some(col), Some(raw), expected)),
+            Err((rule, expected)) => errors.push(err(rule, Some(col), Some(raw), expected)),
         }
     }
     // Toutes les colonnes du schéma doivent figurer dans la ligne, requises ou non :
@@ -101,6 +191,7 @@ pub fn validate_row(schema: &Schema, row: &RawRow) -> Result<Row, Vec<Validation
     for field in &schema.fields {
         if !row.cells.iter().any(|(c, _)| *c == field.name) {
             errors.push(err(
+                Rule::MissingColumn,
                 Some(&field.name),
                 None,
                 format!(
@@ -122,38 +213,43 @@ pub fn validate_row(schema: &Schema, row: &RawRow) -> Result<Row, Vec<Validation
     }
 }
 
-/// Valide une cellule ; en cas d'échec, renvoie la description de ce qui était attendu.
-fn check_cell(field: &Field, raw: &str) -> Result<Value, String> {
+/// Valide une cellule ; en cas d'échec, renvoie la règle violée et la description de ce
+/// qui était attendu.
+fn check_cell(field: &Field, raw: &str) -> Result<Value, (Rule, String)> {
     if raw.is_empty() {
         return if field.required {
-            Err(format!(
-                "une valeur non vide ({}, requis)",
-                describe_type(&field.ty)
+            Err((
+                Rule::RequiredEmpty,
+                format!("une valeur non vide ({}, requis)", describe_type(&field.ty)),
             ))
         } else {
             Ok(Value::Empty)
         };
     }
-    let bad = || describe_type(&field.ty);
+    let wrong = || (Rule::WrongType, describe_type(&field.ty));
+    let range = || (Rule::OutOfRange, describe_type(&field.ty));
     match &field.ty {
         FieldType::String { min_len, max_len } => {
             let n = raw.chars().count();
             if min_len.is_some_and(|m| n < m) || max_len.is_some_and(|m| n > m) {
-                return Err(bad());
+                return Err(range());
             }
             Ok(Value::String(raw.to_owned()))
         }
         FieldType::Int { min, max } => {
-            let v: i64 = raw.parse().map_err(|_| bad())?;
+            let v: i64 = raw.parse().map_err(|_| wrong())?;
             if min.is_some_and(|m| v < m) || max.is_some_and(|m| v > m) {
-                return Err(bad());
+                return Err(range());
             }
             Ok(Value::Int(v))
         }
         FieldType::Float { min, max } => {
-            let v: f64 = raw.parse().map_err(|_| bad())?;
-            if !v.is_finite() || min.is_some_and(|m| v < m) || max.is_some_and(|m| v > m) {
-                return Err(bad());
+            let v: f64 = raw.parse().map_err(|_| wrong())?;
+            if !v.is_finite() {
+                return Err(wrong());
+            }
+            if min.is_some_and(|m| v < m) || max.is_some_and(|m| v > m) {
+                return Err(range());
             }
             Ok(Value::Float(v))
         }
@@ -163,14 +259,14 @@ fn check_cell(field: &Field, raw: &str) -> Result<Value, String> {
             } else if raw.eq_ignore_ascii_case("false") {
                 Ok(Value::Bool(false))
             } else {
-                Err(bad())
+                Err(wrong())
             }
         }
         FieldType::Enum { values } => {
             if values.iter().any(|v| v == raw) {
                 Ok(Value::Enum(raw.to_owned()))
             } else {
-                Err(bad())
+                Err((Rule::NotInEnum, describe_type(&field.ty)))
             }
         }
         FieldType::AssetRef => Ok(Value::AssetRef(raw.to_owned())),
@@ -338,7 +434,7 @@ type = "raw"
         assert!(e.iter().all(|x| x.line == 7));
         assert_eq!(
             e[1].to_string(),
-            "ligne 7, champ 'Qty': reçu \"11\", attendu un entier entre 0 et 10"
+            "ligne 7 (clé Row_1), colonne 'Qty' [OutOfRange]: reçu \"11\", attendu un entier entre 0 et 10"
         );
         assert!(e[4].to_string().contains("une valeur parmi: A, B"));
     }
@@ -370,7 +466,9 @@ type = "raw"
         let e = validate_row(&schema(), &r).unwrap_err();
         assert_eq!(e.len(), 2);
         assert_eq!(e[0].column, None);
-        assert!(e[0].to_string().starts_with("ligne 7, clé de ligne"));
+        assert!(e[0]
+            .to_string()
+            .starts_with("ligne 7 (clé   ), clé de ligne [EmptyKey]"));
     }
 
     #[test]

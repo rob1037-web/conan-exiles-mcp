@@ -1,0 +1,39 @@
+# DataTable : DT_Purge_Nordheimer
+# Row struct : PurgeEnemyMapRow
+# Source     : export CSV réel du Devkit UE5 (fixtures/DT_Purge_Nordheimer.csv)
+#
+# En-tête exporté, dans cet ordre exact :
+#     ---,SourceName,TargetName,Weight,RowType
+# La première colonne (Row Name) a pour en-tête `---` et pour valeurs Trash1, Trash2, ...
+# Les valeurs sont toutes quotées dans l'export, la clé ne l'est pas ; les flottants sont
+# écrits avec six décimales ("10.000000").
+#
+# Ce schéma décrit uniquement ce que l'export montre. Voir la note sur RowType ci-dessous.
+
+name = "DT_Purge_Nordheimer"
+description = "Table de purge Nordheimer (struct PurgeEnemyMapRow)"
+key_column = "---"
+
+[[fields]]
+name = "SourceName"
+type = "string"
+required = true
+
+[[fields]]
+name = "TargetName"
+type = "string"
+required = true
+
+[[fields]]
+name = "Weight"
+type = "float"
+required = true
+
+[[fields]]
+# Enum Unreal EPurgeMapRowType. L'export ne contient que la valeur WeightedSpawnTable : les
+# autres valeurs de l'enum ne sont pas connues d'ici. Si le Devkit en accepte d'autres, les
+# ajouter à `values` (sinon leur écriture sera refusée).
+name = "RowType"
+type = "enum"
+required = true
+values = ["WeightedSpawnTable"]

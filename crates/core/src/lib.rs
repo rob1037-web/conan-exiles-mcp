@@ -20,7 +20,8 @@ pub use sandbox::{check_relative, PathRule, Sandbox, SandboxError};
 pub use schema::{Field, FieldType, Schema, SchemaError};
 pub use schemas::{SchemaEntry, SchemaStore, SchemaStoreError, MAX_SCHEMA_BYTES};
 pub use store::{
-    CsvStore, ModReader, StoreError, WriteOptions, WriteOutcome, BACKUP_DIR, MAX_READ_BYTES,
+    CsvStore, ModReader, SchemaWrite, StoreError, WriteOptions, WriteOutcome, BACKUP_DIR,
+    MAX_READ_BYTES,
 };
-pub use validate::{validate_row, ValidationError};
+pub use validate::{render_report, validate_row, Rule, ValidationError};
 pub use value::{Cell, RawRow, Row, Value};

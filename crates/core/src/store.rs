@@ -18,10 +18,12 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::Config;
-use crate::csv::{CsvError, Table};
+use crate::csv::{validate_table, CsvError, Table};
 use crate::diff::TableDiff;
 use crate::listing::{list_files, ListError, Listing};
 use crate::sandbox::{check_relative, Sandbox, SandboxError};
+use crate::schema::Schema;
+use crate::validate::ValidationError;
 
 /// Taille maximale d'un fichier lu par `read_csv` / `ModReader::read_file`.
 pub const MAX_READ_BYTES: u64 = 16 * 1024 * 1024;
@@ -61,6 +63,11 @@ pub enum StoreError {
     TooLarge { path: PathBuf, size: u64, max: u64 },
     #[error(transparent)]
     List(#[from] ListError),
+    #[error("validation échouée pour la table {table:?}: {count} erreur(s), rien n'a été écrit. Première erreur: {first}", count = errors.len(), first = errors.first().map(|e| e.to_string()).unwrap_or_default())]
+    ValidationFailed {
+        table: String,
+        errors: Vec<ValidationError>,
+    },
     #[error("contenu refusé, ce n'est pas un CSV valide: {source}")]
     InvalidCsv { source: CsvError },
     #[error("le fichier existant {path:?} n'est pas un CSV lisible ({source}): comparaison impossible, il n'est pas modifié")]
@@ -98,6 +105,12 @@ impl StoreError {
             StoreError::List(ListError::InternalFolder { .. }) => "InternalFolder",
             StoreError::List(_) => "ListFailed",
             StoreError::InvalidCsv { .. } => "InvalidCsv",
+            StoreError::ValidationFailed { errors, .. }
+                if errors.iter().any(|e| e.rule.is_schema_drift()) =>
+            {
+                "SchemaDrift"
+            }
+            StoreError::ValidationFailed { .. } => "ValidationFailed",
             StoreError::ExistingUnreadable { .. } => "ExistingUnreadable",
             StoreError::Io { .. } => "IoError",
         }
@@ -272,6 +285,34 @@ impl CsvStore {
         Ok(list_files(&self.csv, subfolder)?)
     }
 
+    /// Écriture **validée par schéma**: le contenu est validé contre `schema` (en-têtes exacts,
+    /// types, obligatoires, enums, unicité des clés) dans tous les cas.
+    ///
+    /// - **dry-run**: renvoie le diff et le rapport de validation (éventuellement non vide),
+    ///   sans rien écrire.
+    /// - **écriture réelle**: refusée avec `ValidationFailed` si le rapport n'est pas vide;
+    ///   sinon mêmes règles que `write_csv` (confirm, sauvegarde, écriture atomique).
+    ///
+    /// Aucun mode « forcer ».
+    pub fn write_with_schema(
+        &self,
+        schema: &Schema,
+        rel: &str,
+        bytes: &[u8],
+        options: WriteOptions,
+    ) -> Result<SchemaWrite, StoreError> {
+        let table = Table::parse(bytes).map_err(|source| StoreError::InvalidCsv { source })?;
+        let report = validate_table(schema, &table).err().unwrap_or_default();
+        if !options.dry_run && !report.is_empty() {
+            return Err(StoreError::ValidationFailed {
+                table: schema.name.clone(),
+                errors: report,
+            });
+        }
+        let outcome = self.write_csv(rel, bytes, options)?;
+        Ok(SchemaWrite { outcome, report })
+    }
+
     /// Écrit un CSV sous `CSV_ROOT` (dossiers intermédiaires créés au besoin, sauf en
     /// dry-run). Le contenu doit être un CSV lisible par `Table::parse`.
     ///
@@ -358,6 +399,15 @@ impl CsvStore {
         outcome.applied = true;
         Ok(outcome)
     }
+}
+
+/// Résultat d'une écriture validée par schéma.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaWrite {
+    pub outcome: WriteOutcome,
+    /// Erreurs de validation. Toujours vide pour une écriture réelle réussie ; en dry-run,
+    /// peut être non vide (l'écriture réelle serait alors refusée).
+    pub report: Vec<ValidationError>,
 }
 
 /// Options d'une écriture.
