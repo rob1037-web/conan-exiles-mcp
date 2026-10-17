@@ -69,9 +69,12 @@ fixtures/      # exports réels du Devkit pour les tests
 ### Phase 3 — Boucle réelle
 - [ ] Générer 20 lignes via Claude, réimporter dans le Devkit, vérifier en jeu
 - [ ] Chaque casse à l'import → nouveau test
+- [ ] Exporter une DataTable contenant du texte (virgules, guillemets, accents) pour valider les cas limites du CSV (tests actuellement marqués « non validé sur un export Devkit réel »)
 - [ ] Unicité des `Name`, vérification des références d'assets existantes
 
 ### Phase 4 — Plus tard
 - [ ] Autres formats de config texte du mod
 - [ ] Réimport automatique si les commandlets sont disponibles
 - [ ] Outil `create_schema_from_fixture` : déduire un schéma depuis un export
+- [ ] Contraintes entre colonnes (ex. `MinAmount` ≤ `MaxAmount`)
+- [ ] Contrôle des références : un `ItemTemplateID` doit exister dans la table des items du jeu
