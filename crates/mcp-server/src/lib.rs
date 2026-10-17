@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use conan_core::{
-    render_report, validate_table, Config, CsvStore, FieldType, ModReader, Newline, Schema,
-    SchemaStore, StoreError, Table, ValidationError, WriteOptions,
+    render_report, validate_table, Config, CsvStore, FieldType, ModReader, Newline, RowOp, Schema,
+    SchemaStore, SchemaWrite, StoreError, Table, ValidationError, WriteOptions,
 };
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -119,6 +119,77 @@ pub struct ValidateParams {
     pub path: Option<String>,
 }
 
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct AddRowParams {
+    /// Nom de la table (ex. "DT_Purge_Nordheimer"), qui désigne son schéma.
+    pub table: String,
+    /// Clé de la nouvelle ligne (Row Name). Ne doit pas exister déjà (casse ignorée). Sa casse
+    /// est conservée telle que fournie.
+    pub key: String,
+    /// TOUTES les colonnes du schéma (hors colonne clé), nom de colonne -> valeur (texte, nombre
+    /// ou booléen). Une colonne inconnue ou manquante est refusée.
+    pub values: std::collections::BTreeMap<String, Value>,
+    /// Chemin du CSV sous CSV_ROOT. Défaut: "<table>.csv". Le fichier doit déjà exister.
+    pub path: Option<String>,
+    /// Défaut TRUE: aperçu seulement (diff + validation). Écrire pour de bon: false ET confirm=true.
+    pub dry_run: Option<bool>,
+    /// Doit être explicitement true, avec dry_run=false, pour écrire réellement.
+    pub confirm: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct UpdateRowParams {
+    /// Nom de la table (ex. "DT_Purge_Nordheimer"), qui désigne son schéma.
+    pub table: String,
+    /// Clé de la ligne à modifier. Doit exister (casse ignorée). La clé n'est pas modifiable.
+    pub key: String,
+    /// Seulement les colonnes à changer, nom de colonne -> nouvelle valeur (texte, nombre ou
+    /// booléen). Les autres colonnes restent inchangées. La colonne clé est refusée.
+    pub values: std::collections::BTreeMap<String, Value>,
+    /// Chemin du CSV sous CSV_ROOT. Défaut: "<table>.csv".
+    pub path: Option<String>,
+    /// Défaut TRUE: aperçu seulement (diff + validation). Écrire pour de bon: false ET confirm=true.
+    pub dry_run: Option<bool>,
+    /// Doit être explicitement true, avec dry_run=false, pour écrire réellement.
+    pub confirm: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DeleteRowParams {
+    /// Nom de la table (ex. "DT_Purge_Nordheimer"), qui désigne son schéma.
+    pub table: String,
+    /// Clé de la ligne à supprimer. Doit exister (casse ignorée).
+    pub key: String,
+    /// Chemin du CSV sous CSV_ROOT. Défaut: "<table>.csv".
+    pub path: Option<String>,
+    /// Défaut TRUE: montre la ligne qui serait supprimée, sans rien écrire. Supprimer pour de
+    /// bon: false ET confirm=true.
+    pub dry_run: Option<bool>,
+    /// Doit être explicitement true, avec dry_run=false, pour supprimer réellement.
+    pub confirm: Option<bool>,
+}
+
+/// Convertit les valeurs JSON d'un outil par ligne en texte (texte, nombre ou booléen seulement).
+fn values_to_text(
+    values: &std::collections::BTreeMap<String, Value>,
+) -> Result<Vec<(String, String)>, String> {
+    values
+        .iter()
+        .map(|(col, v)| match v {
+            Value::String(s) => Ok((col.clone(), s.clone())),
+            Value::Number(n) => Ok((col.clone(), n.to_string())),
+            Value::Bool(b) => Ok((col.clone(), b.to_string())),
+            other => Err(format!(
+                "ERREUR InvalidParameter: la valeur de la colonne {col:?} doit être un texte, un nombre \
+                 ou un booléen (reçu {other}). Rien n'a été écrit."
+            )),
+        })
+        .collect()
+}
+
 fn error_text(e: &StoreError) -> String {
     format!("ERREUR {}: {e}", e.code())
 }
@@ -177,12 +248,182 @@ impl ConanServer {
         })
     }
 
+    /// Exécute une opération par ligne (add_row / update_row / delete_row) pour `table`.
+    fn row_operation(
+        &self,
+        tool: &str,
+        table: &str,
+        path: Option<String>,
+        op: RowOp,
+        dry_run: Option<bool>,
+        confirm: Option<bool>,
+    ) -> Result<CallToolResult, String> {
+        let dry_run = dry_run.unwrap_or(true);
+        let confirm = confirm.unwrap_or(false);
+        if !dry_run && !confirm {
+            return Err(format!(
+                "ERREUR ConfirmRequired: {tool} refusé pour une écriture réelle. Il faut dry_run=false ET \
+                 confirm=true, explicitement. Rien n'a été écrit; relancer d'abord en dry_run (défaut) \
+                 pour voir le diff."
+            ));
+        }
+        // Pas de schéma valide, pas d'opération: même en dry-run.
+        let schema = self.schema_for(table)?;
+        let path = path.unwrap_or_else(|| format!("{}.csv", schema.name));
+        let key = op.key().to_owned();
+        match self
+            .store
+            .apply_row_op(&schema, &path, &op, WriteOptions { dry_run, confirm })
+        {
+            Ok(row) if row.no_change => {
+                let text = format!(
+                    "AUCUN CHANGEMENT: {tool} sur la clé {} de la table {} ne change aucune valeur. Rien n'a \
+                     été écrit, aucune sauvegarde créée.\n",
+                    row.key, schema.name
+                );
+                let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+                result.structured_content = Some(json!({
+                    "table": schema.name, "tool": tool, "key": row.key, "path": path,
+                    "no_change": true, "applied": false, "dry_run": false,
+                }));
+                Ok(result)
+            }
+            Ok(row) => {
+                let label = format!("{tool} — clé {}", row.key);
+                Ok(self.write_result(&schema, &path, row.write, Some(&label)))
+            }
+            Err(StoreError::ValidationFailed { table, errors }) => {
+                Ok(validation_refused(&table, &errors))
+            }
+            Err(e @ StoreError::Sandbox(conan_core::SandboxError::NotFound { .. })) => Err(format!(
+                "{} Le CSV de la table doit déjà exister (path={path:?}); pour le créer, utiliser write_datatable. \
+                 Opération sur la clé {key:?}.",
+                error_text(&e)
+            )),
+            Err(e) => Err(error_text(&e)),
+        }
+    }
+
+    /// Rend le résultat d'une écriture (dry-run ou réelle) validée par schéma.
+    fn write_result(
+        &self,
+        schema: &Schema,
+        path: &str,
+        written: SchemaWrite,
+        operation: Option<&str>,
+    ) -> CallToolResult {
+        let (outcome, validation, normalized) =
+            (written.outcome, written.report, written.normalized);
+        let backup_rel = outcome.backup.as_ref().map(|b| {
+            b.strip_prefix(self.store.csv_root())
+                .unwrap_or(b)
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/")
+        });
+        let status = if outcome.unchanged {
+            "AUCUN CHANGEMENT (contenu identique, rien n'a été écrit)"
+        } else if outcome.applied {
+            "ÉCRIT"
+        } else if validation.is_empty() {
+            "DRY-RUN (aperçu seulement, rien n'a été écrit)"
+        } else {
+            "DRY-RUN — VALIDATION ÉCHOUÉE (aperçu seulement, rien n'a été écrit; l'écriture réelle serait refusée)"
+        };
+        let mut report = format!("{status}\n");
+        if let Some(op) = operation {
+            report.push_str(&format!("Opération: {op}\n"));
+        }
+        report.push_str(&format!(
+            "Table: {} — fichier: {} ({})\nChemin réel: {}\n{}",
+            schema.name,
+            path,
+            if outcome.existed {
+                "existant"
+            } else {
+                "nouveau"
+            },
+            pretty(&outcome.path),
+            outcome.diff.render(),
+        ));
+        if validation.is_empty() {
+            report.push_str("Validation: OK\n");
+        } else {
+            report.push_str(&format!(
+                "Validation: {} erreur(s){}\n{}",
+                validation.len(),
+                if validation.iter().any(|e| e.rule.is_schema_drift()) {
+                    " — DÉRIVE DE SCHÉMA"
+                } else {
+                    ""
+                },
+                report_text(&validation),
+            ));
+        }
+        if normalized {
+            report.push_str(
+                "Format: le contenu reçu a été remis au format du Devkit (en-tête et clés sans guillemets, \
+                 valeurs entre guillemets, flottants à six décimales, LF) avant comparaison et écriture; \
+                 le diff ne montre que les changements de valeur.\n",
+            );
+        }
+        if let (Some(b), Some(rel)) = (&outcome.backup, &backup_rel) {
+            report.push_str(&format!(
+                "Sauvegarde créée: {rel}\nChemin réel de la sauvegarde: {}\n",
+                pretty(b)
+            ));
+        }
+        if !outcome.applied && !outcome.unchanged && validation.is_empty() {
+            report
+                .push_str("Pour écrire réellement: rappeler avec dry_run=false et confirm=true.\n");
+        }
+        let mut result = CallToolResult::success(vec![ContentBlock::text(report)]);
+        let mut structured = structured_write(path, &outcome, backup_rel);
+        structured["table"] = json!(schema.name);
+        structured["valid"] = json!(validation.is_empty());
+        structured["normalized"] = json!(normalized);
+        structured["schema_drift"] = json!(validation.iter().any(|e| e.rule.is_schema_drift()));
+        structured["validation_errors"] =
+            json!(validation.iter().map(error_json).collect::<Vec<_>>());
+        result.structured_content = Some(structured);
+        result
+    }
+
     /// Charge le schéma d'une table (erreur bloquante s'il est absent ou malformé).
     fn schema_for(&self, table: &str) -> Result<Schema, String> {
         self.schema_store()?
             .load(table)
             .map_err(|e| format!("ERREUR {}: {e}", e.code()))
     }
+}
+
+/// Écriture réelle refusée par la validation: erreur d'outil avec le rapport complet.
+fn validation_refused(table: &str, errors: &[ValidationError]) -> CallToolResult {
+    let drift = errors.iter().any(|e| e.rule.is_schema_drift());
+    let code = if drift {
+        "SchemaDrift"
+    } else {
+        "ValidationFailed"
+    };
+    let text = format!(
+        "ERREUR {code}: écriture refusée pour la table {table}, {} erreur(s) de validation \
+         ({}). Rien n'a été écrit. Il n'existe aucun mode pour forcer.\n{}",
+        errors.len(),
+        if drift {
+            "dérive de schéma: l'en-tête ne correspond pas au schéma"
+        } else {
+            "valeurs invalides"
+        },
+        report_text(errors),
+    );
+    let mut result = CallToolResult::error(vec![ContentBlock::text(text)]);
+    result.structured_content = Some(json!({
+        "table": table, "valid": false, "schema_drift": drift,
+        "error_count": errors.len(),
+        "errors": errors.iter().map(error_json).collect::<Vec<_>>(),
+    }));
+    result
 }
 
 fn error_json(e: &ValidationError) -> Value {
@@ -467,111 +708,102 @@ impl ConanServer {
                 .path
                 .clone()
                 .unwrap_or_else(|| format!("{}.csv", schema.name));
-            let written = match self.store.write_with_schema(
+            match self.store.write_with_schema(
                 &schema,
                 &path,
                 p.content.as_bytes(),
                 WriteOptions { dry_run, confirm },
             ) {
-                Ok(w) => w,
+                Ok(written) => Ok(self.write_result(&schema, &path, written, None)),
                 Err(StoreError::ValidationFailed { table, errors }) => {
-                    let drift = errors.iter().any(|e| e.rule.is_schema_drift());
-                    let code = if drift {
-                        "SchemaDrift"
-                    } else {
-                        "ValidationFailed"
-                    };
-                    let text = format!(
-                        "ERREUR {code}: écriture refusée pour la table {table}, {} erreur(s) de validation \
-                         ({}). Rien n'a été écrit. Il n'existe aucun mode pour forcer.\n{}",
-                        errors.len(),
-                        if drift { "dérive de schéma: l'en-tête ne correspond pas au schéma" } else { "valeurs invalides" },
-                        report_text(&errors),
-                    );
-                    let mut result = CallToolResult::error(vec![ContentBlock::text(text)]);
-                    result.structured_content = Some(json!({
-                        "table": table, "valid": false, "schema_drift": drift,
-                        "error_count": errors.len(),
-                        "errors": errors.iter().map(error_json).collect::<Vec<_>>(),
-                    }));
-                    return Ok(result);
+                    Ok(validation_refused(&table, &errors))
                 }
-                Err(e) => return Err(error_text(&e)),
-            };
-            let (outcome, validation, normalized) =
-                (written.outcome, written.report, written.normalized);
+                Err(e) => Err(error_text(&e)),
+            }
+        })
+    }
 
-            let backup_rel = outcome.backup.as_ref().map(|b| {
-                b.strip_prefix(self.store.csv_root())
-                    .unwrap_or(b)
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                    .collect::<Vec<_>>()
-                    .join("/")
-            });
-            let status = if outcome.unchanged {
-                "AUCUN CHANGEMENT (contenu identique, rien n'a été écrit)"
-            } else if outcome.applied {
-                "ÉCRIT"
-            } else if validation.is_empty() {
-                "DRY-RUN (aperçu seulement, rien n'a été écrit)"
-            } else {
-                "DRY-RUN — VALIDATION ÉCHOUÉE (aperçu seulement, rien n'a été écrit; l'écriture réelle serait refusée)"
-            };
-            let mut report = format!(
-                "{status}\nTable: {} — fichier: {} ({})\nChemin réel: {}\n{}",
-                schema.name,
-                path,
-                if outcome.existed {
-                    "existant"
-                } else {
-                    "nouveau"
+    #[tool(
+        description = "AJOUTE une ligne à la FIN d'une DataTable existante (CSV sous CSV_ROOT), validée contre \
+                       le schéma de la table. La clé (`key`, nom de ligne) ne doit pas exister déjà, casse \
+                       ignorée (noms de ligne Unreal); sa casse est conservée. `values` doit contenir TOUTES \
+                       les colonnes du schéma (voir describe_schema); toute colonne inconnue est refusée. Le \
+                       CSV existant doit être valide (sinon refus, utiliser validate_rows: aucune \
+                       réparation) et la table entière résultante est revalidée. PAR DÉFAUT dry_run=true: \
+                       aperçu (diff + validation), rien n'est écrit. Écriture réelle: dry_run=false ET \
+                       confirm=true; le CSV existant est d'abord sauvegardé dans .backup. Pour modifier une \
+                       ligne existante, utiliser update_row; pour la supprimer, delete_row."
+    )]
+    fn add_row(&self, Parameters(p): Parameters<AddRowParams>) -> Result<CallToolResult, String> {
+        guarded(|| {
+            let values = values_to_text(&p.values)?;
+            self.row_operation(
+                "add_row",
+                &p.table,
+                p.path.clone(),
+                RowOp::Add {
+                    key: p.key.clone(),
+                    values,
                 },
-                pretty(&outcome.path),
-                outcome.diff.render(),
-            );
-            if validation.is_empty() {
-                report.push_str("Validation: OK\n");
-            } else {
-                report.push_str(&format!(
-                    "Validation: {} erreur(s){}\n{}",
-                    validation.len(),
-                    if validation.iter().any(|e| e.rule.is_schema_drift()) {
-                        " — DÉRIVE DE SCHÉMA"
-                    } else {
-                        ""
-                    },
-                    report_text(&validation),
-                ));
-            }
-            if normalized {
-                report.push_str(
-                    "Format: le contenu reçu a été remis au format du Devkit (en-tête et clés sans guillemets, \
-                     valeurs entre guillemets, flottants à six décimales, LF) avant comparaison et écriture; \
-                     le diff ne montre que les changements de valeur.\n",
-                );
-            }
-            if let (Some(b), Some(rel)) = (&outcome.backup, &backup_rel) {
-                report.push_str(&format!(
-                    "Sauvegarde créée: {rel}\nChemin réel de la sauvegarde: {}\n",
-                    pretty(b)
-                ));
-            }
-            if !outcome.applied && !outcome.unchanged && validation.is_empty() {
-                report.push_str(
-                    "Pour écrire réellement: rappeler avec dry_run=false et confirm=true.\n",
-                );
-            }
-            let mut result = CallToolResult::success(vec![ContentBlock::text(report)]);
-            let mut structured = structured_write(&path, &outcome, backup_rel);
-            structured["table"] = json!(schema.name);
-            structured["valid"] = json!(validation.is_empty());
-            structured["normalized"] = json!(normalized);
-            structured["schema_drift"] = json!(validation.iter().any(|e| e.rule.is_schema_drift()));
-            structured["validation_errors"] =
-                json!(validation.iter().map(error_json).collect::<Vec<_>>());
-            result.structured_content = Some(structured);
-            Ok(result)
+                p.dry_run,
+                p.confirm,
+            )
+        })
+    }
+
+    #[tool(
+        description = "MODIFIE une ligne existante d'une DataTable (CSV sous CSV_ROOT), validée contre le \
+                       schéma de la table. La clé (`key`) doit exister, casse ignorée (la casse stockée est \
+                       conservée). `values` ne contient QUE les colonnes à changer: elles sont fusionnées avec \
+                       la ligne existante, les autres colonnes sont inchangées. La colonne clé n'est PAS \
+                       modifiable (renommer = delete_row puis add_row). Si la fusion ne change aucune valeur, \
+                       la réponse est « AUCUN CHANGEMENT » sans écriture ni sauvegarde. Le CSV existant doit \
+                       être valide (sinon refus, utiliser validate_rows: aucune réparation) et la table \
+                       entière résultante est revalidée. PAR DÉFAUT dry_run=true: aperçu (diff + validation). \
+                       Écriture réelle: dry_run=false ET confirm=true; sauvegarde dans .backup avant écriture."
+    )]
+    fn update_row(
+        &self,
+        Parameters(p): Parameters<UpdateRowParams>,
+    ) -> Result<CallToolResult, String> {
+        guarded(|| {
+            let values = values_to_text(&p.values)?;
+            self.row_operation(
+                "update_row",
+                &p.table,
+                p.path.clone(),
+                RowOp::Update {
+                    key: p.key.clone(),
+                    values,
+                },
+                p.dry_run,
+                p.confirm,
+            )
+        })
+    }
+
+    #[tool(
+        description = "SUPPRIME DÉFINITIVEMENT une ligne d'une DataTable existante (CSV sous CSV_ROOT; une \
+                       sauvegarde de l'état précédent est faite dans .backup). La clé (`key`) doit exister, \
+                       casse ignorée. PAR DÉFAUT dry_run=true: le diff montre la ligne qui SERAIT supprimée, \
+                       rien n'est écrit — présentez-la à l'utilisateur avant de continuer. Suppression \
+                       réelle: dry_run=false ET confirm=true, explicites. Le CSV existant doit être valide \
+                       (sinon refus, utiliser validate_rows: aucune réparation) et la table résultante est \
+                       revalidée. L'ordre des autres lignes est conservé."
+    )]
+    fn delete_row(
+        &self,
+        Parameters(p): Parameters<DeleteRowParams>,
+    ) -> Result<CallToolResult, String> {
+        guarded(|| {
+            self.row_operation(
+                "delete_row",
+                &p.table,
+                p.path.clone(),
+                RowOp::Delete { key: p.key.clone() },
+                p.dry_run,
+                p.confirm,
+            )
         })
     }
 }
