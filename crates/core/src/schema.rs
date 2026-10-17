@@ -580,8 +580,11 @@ type = "raw"
 
     #[test]
     fn example_schema_parses_and_covers_every_type() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../schemas/exemple.toml");
-        let s = Schema::from_file(Path::new(path)).unwrap();
+        let s = Schema::from_toml_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/exemple.toml"
+        )))
+        .unwrap();
         let used: std::collections::BTreeSet<_> =
             s.fields.iter().map(|f| f.ty.type_name()).collect();
         let known: std::collections::BTreeSet<_> = KNOWN_TYPES.iter().copied().collect();
@@ -590,11 +593,11 @@ type = "raw"
 
     #[test]
     fn lightning_rod_loot_schema_parses() {
-        let path = concat!(
+        let s = Schema::from_toml_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../schemas/lightning_rod_loot.toml"
-        );
-        let s = Schema::from_file(Path::new(path)).unwrap();
+        )))
+        .unwrap();
         let cols: Vec<_> = s.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(cols, ["ItemTemplateID", "MinAmount", "MaxAmount"]);
         assert!(s

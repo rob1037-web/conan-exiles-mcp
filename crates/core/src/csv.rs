@@ -481,7 +481,6 @@ impl<'a> Parser<'a> {
 mod tests {
     use super::*;
     use crate::value::{Cell, Value};
-    use std::path::Path;
 
     fn parse(s: &str) -> Result<Table, CsvError> {
         Table::parse(s.as_bytes())
@@ -491,12 +490,22 @@ mod tests {
         rec.cells.iter().map(|c| c.text.as_str()).collect()
     }
 
+    // Intégrés à la compilation : les tests cross-compilés tournent sous Windows,
+    // où le chemin du dépôt WSL n'existe pas.
     fn fixture() -> Vec<u8> {
-        let path = concat!(
+        include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../fixtures/DT_LightningRodLoot_Common.csv"
-        );
-        std::fs::read(path).unwrap()
+        ))
+        .to_vec()
+    }
+
+    fn lightning_schema() -> Schema {
+        Schema::from_toml_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/lightning_rod_loot.toml"
+        )))
+        .unwrap()
     }
 
     #[test]
@@ -526,11 +535,7 @@ mod tests {
 
     #[test]
     fn fixture_validates_against_its_schema() {
-        let schema_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../schemas/lightning_rod_loot.toml"
-        );
-        let schema = Schema::from_file(Path::new(schema_path)).unwrap();
+        let schema = lightning_schema();
         let t = Table::parse(&fixture()).unwrap();
         let rows = validate_table(&schema, &t).unwrap();
         assert_eq!(rows.len(), 4);
@@ -720,14 +725,6 @@ mod tests {
             let t = Table::parse(case).unwrap();
             assert_eq!(t.to_bytes(), *case, "{:?}", String::from_utf8_lossy(case));
         }
-    }
-
-    fn lightning_schema() -> Schema {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../schemas/lightning_rod_loot.toml"
-        );
-        Schema::from_file(Path::new(path)).unwrap()
     }
 
     #[test]
