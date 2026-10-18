@@ -28,7 +28,11 @@ fn main() -> ExitCode {
             }
         },
         Some(name) => {
-            let Some(template) = templates::ALL.iter().find(|t| t.name == name) else {
+            let Some(template) = templates::ALL
+                .iter()
+                .chain(mcp_server::ue_bridge::probes::ALL.iter())
+                .find(|t| t.name == name)
+            else {
                 eprintln!("gabarit inconnu: {name}");
                 return ExitCode::from(2);
             };

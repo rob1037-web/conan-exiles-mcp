@@ -22,6 +22,7 @@ const PRELUDE: &str = r##"
 import json
 import re
 import sys
+import time
 import unreal
 
 _PARAMS = json.loads(__CONAN_PARAMS__)
@@ -331,6 +332,10 @@ pub const BLUEPRINT_VARIABLES: Template = Template {
 pub const ALL: [Template; 4] = [STATUS, SEARCH_ASSETS, DESCRIBE_ASSET, BLUEPRINT_VARIABLES];
 
 impl Template {
+    pub(crate) const fn new(name: &'static str, body: &'static str) -> Template {
+        Template { name, body }
+    }
+
     /// Code Python complet. Les paramètres sont sérialisés en JSON puis re-sérialisés en littéral
     /// de chaîne (un littéral JSON est un littéral Python valide): `json.loads("...")` les relit,
     /// quel que soit leur contenu (guillemets, retours à la ligne, `'''`, jetons...).
@@ -361,7 +366,7 @@ pub fn extract_payload(text: &str) -> Result<Value, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
     use std::process::Command;
@@ -415,8 +420,8 @@ mod tests {
         assert_eq!(rest, clean);
     }
 
-    #[test]
-    fn forbidden_calls_never_appear_in_templates() {
+    /// Interdits communs aux gabarits des outils et aux sondes (lecture seule stricte).
+    pub(crate) fn assert_read_only(t: &Template) {
         const FORBIDDEN: &[&str] = &[
             "save_",
             "delete_",
@@ -444,23 +449,43 @@ mod tests {
             "modify(",
             "compile_blueprint",
             "request_",
+            "add_member_variable",
+            "remove_",
+            "set_blueprint_variable",
+            "change_member_variable_type",
+            "reparent_",
+            "refresh_",
+            "add_function",
+            "add_event",
+            "replace_variable",
         ];
+        let src = t.source();
+        for bad in FORBIDDEN {
+            assert!(!src.contains(bad), "gabarit {}: contient {bad:?}", t.name);
+        }
+        // seuls `import json`, `import re`, `import sys`, `import unreal` sont admis (en tête de fichier)
+        for line in src.lines().filter(|l| {
+            l.trim_start().starts_with("import ") || l.trim_start().starts_with("from ")
+        }) {
+            assert!(
+                [
+                    "import json",
+                    "import re",
+                    "import sys",
+                    "import time",
+                    "import unreal"
+                ]
+                .contains(&line),
+                "{}: {line}",
+                t.name
+            );
+        }
+    }
+
+    #[test]
+    fn forbidden_calls_never_appear_in_templates() {
         for t in ALL {
-            let src = t.source();
-            for bad in FORBIDDEN {
-                assert!(!src.contains(bad), "gabarit {}: contient {bad:?}", t.name);
-            }
-            // seuls `import json`, `import re`, `import sys`, `import unreal` sont admis
-            for line in src.lines().filter(|l| {
-                l.trim_start().starts_with("import ") || l.trim_start().starts_with("from ")
-            }) {
-                assert!(
-                    ["import json", "import re", "import sys", "import unreal"]
-                        .contains(&line.trim()),
-                    "{}: {line}",
-                    t.name
-                );
-            }
+            assert_read_only(&t);
         }
         // load_asset: uniquement dans le gabarit d'inspection ciblée, une seule fois, jamais dans une boucle
         for t in ALL {

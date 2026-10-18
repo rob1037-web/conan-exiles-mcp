@@ -8,6 +8,8 @@
 //! paramètres y entrent par `json.loads` d'un littéral, jamais par interpolation.
 
 pub mod message;
+#[cfg(any(test, feature = "test-support"))]
+pub mod probes;
 pub mod templates;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
