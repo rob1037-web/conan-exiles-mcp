@@ -48,7 +48,7 @@ fn params_of(command: &str) -> Value {
 }
 
 #[tokio::test]
-async fn the_four_ue_tools_are_exposed_as_read_only() {
+async fn the_six_ue_tools_are_exposed_as_read_only() {
     let node = node_replying(json!({}));
     let (_env, s) = session(&node).await;
     let tools = s.client.list_all_tools().await.unwrap();
@@ -57,6 +57,8 @@ async fn the_four_ue_tools_are_exposed_as_read_only() {
         "ue_search_assets",
         "ue_describe_asset",
         "ue_blueprint_variables",
+        "ue_get_defaults",
+        "ue_diff_defaults",
     ] {
         let t = tools
             .iter()
@@ -461,4 +463,249 @@ async fn concurrent_ue_calls_are_serialized_one_session_each() {
     std::thread::sleep(std::time::Duration::from_millis(200));
     assert_eq!(node.opens.load(Ordering::SeqCst), 3);
     assert_eq!(node.closes.load(Ordering::SeqCst), 3);
+}
+
+// ---- Phase 4b, étape 2: ue_get_defaults / ue_diff_defaults ----
+
+/// Faux éditeur qui sert `total` éléments « P0..Pn » par lots de 60, en lisant `start` dans les
+/// paramètres que le script a reçus (comme le vrai gabarit). `value_of(asset, i)` donne la valeur.
+fn defaults_node(
+    total: usize,
+    value_of: impl Fn(&str, usize) -> Value + Send + Sync + 'static,
+) -> FakeNode {
+    FakeNode::start(Behavior::default(), move |command| {
+        let p = params_of(command);
+        let asset = p["object_path"].as_str().unwrap().to_owned();
+        let start = p["start"].as_u64().unwrap() as usize;
+        let stop = (start + 60).min(total);
+        let items: Vec<Value> = (start..stop)
+            .map(|i| {
+                json!({"name": format!("P{i}"), "owner": "/Script/X.Y", "type": "int", "value": value_of(&asset, i)})
+            })
+            .collect();
+        let payload = json!({
+            "object_path": asset, "section": p["section"], "total": total, "start": start,
+            "next_index": if stop < total { json!(stop) } else { Value::Null },
+            "budget_exceeded": false, "missing_names": [], "items": items,
+            "dirty_packages": [], "warnings": [], "elapsed_s": 0.01,
+        });
+        Reply::printing(&format!("{MARKER_BEGIN}{payload}{MARKER_END}"))
+    })
+}
+
+#[tokio::test]
+async fn ue_get_defaults_follows_next_index_in_batches_and_returns_compact_json() {
+    let node = defaults_node(130, |_, i| json!(i));
+    let (_env, s) = session(&node).await;
+    let r = s
+        .call(
+            "ue_get_defaults",
+            json!({"object_path": "/Game/Mods/test/BP_Test", "names": ["P1", "P1", "P2"], "expand": ["P3"]}),
+        )
+        .await;
+    assert!(!is_error(&r), "{}", text(&r));
+    assert_json_text(&r);
+    let v = structured(&r);
+    assert_eq!(
+        (
+            v["total"].clone(),
+            v["returned"].clone(),
+            v["complete"].clone()
+        ),
+        (json!(130), json!(130), json!(true))
+    );
+    assert_eq!(v["commands"], 3);
+    assert_eq!(v["items"][129]["name"], "P129");
+    assert_eq!(v["object_path"], "/Game/Mods/test/BP_Test.BP_Test");
+    // les paramètres envoyés: chemin normalisé, noms dédoublonnés, `start` croissant, jamais d'écriture
+    let sent: Vec<Value> = node
+        .commands
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|c| params_of(c))
+        .collect();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(
+        sent.iter()
+            .map(|p| p["start"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [0, 60, 120]
+    );
+    assert_eq!(sent[0]["names"], json!(["P1", "P2"]));
+    assert_eq!(sent[0]["expand"], json!(["P3"]));
+    assert_eq!(sent[0]["object_path"], "/Game/Mods/test/BP_Test.BP_Test");
+    for c in node.commands.lock().unwrap().iter() {
+        for forbidden in ["save_", "set_editor_property", "compile_blueprint"] {
+            assert!(!c.contains(forbidden), "{forbidden}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn ue_get_defaults_stops_after_12_commands_and_resumes_with_start() {
+    let node = defaults_node(900, |_, i| json!(i));
+    let (_env, s) = session(&node).await;
+    let r = s
+        .call("ue_get_defaults", json!({"object_path": "/Game/BP_Big"}))
+        .await;
+    let v = structured(&r);
+    assert_eq!(
+        (
+            v["commands"].clone(),
+            v["returned"].clone(),
+            v["complete"].clone()
+        ),
+        (json!(12), json!(720), json!(false))
+    );
+    assert_eq!(v["next_index"], 720);
+    let r = s
+        .call(
+            "ue_get_defaults",
+            json!({"object_path": "/Game/BP_Big", "start": 720}),
+        )
+        .await;
+    let v = structured(&r);
+    assert_eq!(
+        (v["returned"].clone(), v["complete"].clone()),
+        (json!(180), json!(true))
+    );
+    assert_eq!(v["items"][0]["name"], "P720");
+}
+
+#[tokio::test]
+async fn ue_get_defaults_validates_parameters_before_touching_the_editor() {
+    let node = defaults_node(3, |_, i| json!(i));
+    let (_env, s) = session(&node).await;
+    let too_many: Vec<String> = (0..201).map(|i| format!("P{i}")).collect();
+    for (args, expect) in [
+        (json!({"object_path": "Game/BP"}), "object_path"),
+        (
+            json!({"object_path": "/Game/BP", "section": "all"}),
+            "section",
+        ),
+        (
+            json!({"object_path": "/Game/BP", "section": "component_values"}),
+            "component",
+        ),
+        (
+            json!({"object_path": "/Game/BP", "names": too_many}),
+            "maximum 200",
+        ),
+        (
+            json!({"object_path": "/Game/BP", "names": [""]}),
+            "nom invalide",
+        ),
+        (
+            json!({"object_path": "/Game/BP", "expand": (0..21).map(|i| format!("E{i}")).collect::<Vec<_>>()}),
+            "maximum 20",
+        ),
+    ] {
+        let r = s.call("ue_get_defaults", args.clone()).await;
+        assert!(
+            is_error(&r)
+                && text(&r).starts_with("ERREUR InvalidParameter:")
+                && text(&r).contains(expect),
+            "{args}: {}",
+            text(&r)
+        );
+    }
+    assert_eq!(
+        node.opens.load(Ordering::SeqCst),
+        0,
+        "rien n'est envoyé à l'éditeur"
+    );
+}
+
+#[tokio::test]
+async fn ue_get_defaults_relays_script_errors_and_refuses_a_stuck_cursor() {
+    let node =
+        node_replying(json!({"error": "Asset introuvable ou non chargeable: /Game/Nope.Nope"}));
+    let (_env, s) = session(&node).await;
+    let r = s
+        .call("ue_get_defaults", json!({"object_path": "/Game/Nope"}))
+        .await;
+    assert!(
+        is_error(&r)
+            && text(&r).starts_with("ERREUR PythonError:")
+            && text(&r).contains("introuvable"),
+        "{}",
+        text(&r)
+    );
+    // un éditeur qui répondrait toujours next_index=0 ne doit pas faire boucler le serveur
+    let node = node_replying(
+        json!({"object_path": "/Game/B.B", "section": "members", "total": 5, "next_index": 0, "items": [], "warnings": []}),
+    );
+    let (_env, s) = session(&node).await;
+    let r = s
+        .call("ue_get_defaults", json!({"object_path": "/Game/B"}))
+        .await;
+    assert!(
+        is_error(&r) && text(&r).contains("ne progresse pas"),
+        "{}",
+        text(&r)
+    );
+    assert_eq!(node.opens.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn ue_diff_defaults_reports_differences_with_float_tolerance() {
+    let node = defaults_node(70, |asset, i| {
+        let base = if i == 3 {
+            json!(1000)
+        } else if i == 4 {
+            json!(500.0)
+        } else {
+            json!(i)
+        };
+        if asset.contains("BP_B") && i == 3 {
+            json!(5000)
+        } else if asset.contains("BP_B") && i == 4 {
+            json!(500.0000004)
+        } else {
+            base
+        }
+    });
+    let (_env, s) = session(&node).await;
+    let r = s
+        .call(
+            "ue_diff_defaults",
+            json!({"object_path_a": "/Game/BP_A", "object_path_b": "/Game/BP_B"}),
+        )
+        .await;
+    assert!(!is_error(&r), "{}", text(&r));
+    assert_json_text(&r);
+    let v = structured(&r);
+    assert_eq!(
+        (v["identical"].clone(), v["different"].clone()),
+        (json!(69), json!(1))
+    );
+    assert_eq!(v["differences"][0]["name"], "P3");
+    assert_eq!(
+        (
+            v["differences"][0]["a"].clone(),
+            v["differences"][0]["b"].clone()
+        ),
+        (json!(1000), json!(5000))
+    );
+    assert_eq!(v["complete"], true);
+    assert_eq!(v["commands"], 4);
+    assert_eq!(v["a"]["object_path"], "/Game/BP_A.BP_A");
+}
+
+#[tokio::test]
+async fn ue_diff_defaults_refuses_a_blueprint_too_large_to_read_in_one_call() {
+    let node = defaults_node(900, |_, i| json!(i));
+    let (_env, s) = session(&node).await;
+    let r = s
+        .call(
+            "ue_diff_defaults",
+            json!({"object_path_a": "/Game/BP_A", "object_path_b": "/Game/BP_B"}),
+        )
+        .await;
+    assert!(
+        is_error(&r) && text(&r).starts_with("ERREUR TooLarge:") && text(&r).contains("names"),
+        "{}",
+        text(&r)
+    );
 }

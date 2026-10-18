@@ -67,7 +67,9 @@ Outils Phase 4a, **lecture seule** sur le Devkit ouvert (voir [phase-4a-test.md]
 | `ue_status` | Devkit joignable ? version du moteur, projet, nombre d'assets du registre |
 | `ue_search_assets` | Cherche dans l'Asset Registry (`path_prefix`, `class_name`, `name_contains`, `limit` 50 / max 500) |
 | `ue_describe_asset` | Classe, package, tags du registre et dépendances directes d'un asset (sans le charger) |
-| `ue_blueprint_variables` | Variables d'un Blueprint : nom, type, catégorie, valeur par défaut |
+| `ue_blueprint_variables` | Variables d'un Blueprint : nom, type, catégorie, valeur par défaut (60 variables / 2 s par appel, suite par `start`) |
+| `ue_get_defaults` | Valeurs par défaut d'un Blueprint : membres hérités compris, composants, propriétés d'un composant ; lecture bornée, conteneurs non dépliés par défaut |
+| `ue_diff_defaults` | Compare les valeurs par défaut de deux Blueprints (flottants à 1e-6 près) |
 
 Variable facultative : `UE_PROJECT_NAME` (défaut `ConanSandbox`).
 

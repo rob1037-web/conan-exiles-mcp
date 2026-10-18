@@ -9,6 +9,7 @@
 //! un texte `ERREUR <code>: <message lisible>`, jamais comme panic ni erreur de protocole.
 
 pub mod ue_bridge;
+pub mod ue_defaults;
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -226,7 +227,55 @@ pub struct UeBlueprintParams {
     /// Lister aussi les variables héritées des classes parentes (défaut false: seulement celles
     /// déclarées dans ce Blueprint).
     pub include_inherited: Option<bool>,
+    /// Reprise: indice de départ dans la liste des variables (le champ `next_index` de la réponse
+    /// précédente). Une commande lit au plus 60 variables et s'arrête après 2 s.
+    pub start: Option<usize>,
+    /// Noms exacts des variables dont le conteneur/struct doit être déplié (20 éléments au plus).
+    pub expand: Option<Vec<String>>,
 }
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct UeDefaultsParams {
+    /// Chemin d'objet du Blueprint (ex. "/Game/Mods/test/test/Mailbox/BP_PL_Mailbox.BP_PL_Mailbox").
+    pub object_path: String,
+    /// "members" (défaut: variables et propriétés héritées, valeurs lues sur le CDO), "components"
+    /// (liste des composants, hérités compris) ou "component_values" (propriétés d'UN composant,
+    /// champ `component` obligatoire).
+    pub section: Option<String>,
+    /// Nom de variable du composant pour section="component_values" (voir section="components").
+    pub component: Option<String>,
+    /// Noms EXACTS des propriétés à lire (200 au plus). Sans ce champ: tous les membres.
+    pub names: Option<Vec<String>>,
+    /// Noms exacts des propriétés dont le tableau/set/map/struct doit être déplié (20 au plus,
+    /// 20 éléments par conteneur). Par défaut les conteneurs et structs ne sont PAS dépliés.
+    pub expand: Option<Vec<String>>,
+    /// Reprise: `next_index` d'une réponse précédente incomplète.
+    pub start: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct UeDiffParams {
+    /// Premier Blueprint (chemin d'objet).
+    pub object_path_a: String,
+    /// Second Blueprint (chemin d'objet).
+    pub object_path_b: String,
+    /// "members" (défaut), "components" ou "component_values" (voir ue_get_defaults).
+    pub section: Option<String>,
+    /// Composant à comparer pour section="component_values".
+    pub component: Option<String>,
+    /// Noms exacts des propriétés à comparer (200 au plus). Sans ce champ: tous les membres.
+    pub names: Option<Vec<String>>,
+    /// Noms exacts des propriétés à déplier des deux côtés (20 au plus).
+    pub expand: Option<Vec<String>>,
+}
+
+/// Commandes envoyées à l'éditeur au plus par appel d'outil (chacune: un chargement, 60 éléments, 2 s).
+const UE_MAX_COMMANDS: usize = 12;
+const UE_MAX_NAMES: usize = 200;
+const UE_MAX_EXPAND: usize = 20;
+const UE_SECTIONS: [&str; 3] = ["members", "components", "component_values"];
 
 const UE_DEFAULT_LIMIT: usize = 50;
 const UE_MAX_LIMIT: usize = 500;
@@ -259,6 +308,83 @@ fn ue_text_param(name: &str, value: &Option<String>) -> Result<Option<String>, S
         )),
         Some(v) => Ok(Some(v.to_owned())),
     }
+}
+
+/// Liste de noms de propriétés: bornée, sans vide ni doublon silencieux.
+fn ue_names_param(
+    name: &str,
+    value: &Option<Vec<String>>,
+    max: usize,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(list) = value else { return Ok(None) };
+    if list.len() > max {
+        return Err(format!(
+            "ERREUR InvalidParameter: {name} contient {} noms, maximum {max}.",
+            list.len()
+        ));
+    }
+    let mut out: Vec<String> = Vec::new();
+    for raw in list {
+        let n = raw.trim();
+        if n.is_empty() || n.chars().count() > 128 || n.chars().any(char::is_control) {
+            return Err(format!(
+                "ERREUR InvalidParameter: {name} contient un nom invalide ({raw:?}); \
+                 attendu: un nom exact de propriété (non vide, 128 caractères au plus)."
+            ));
+        }
+        if !out.iter().any(|o| o == n) {
+            out.push(n.to_owned());
+        }
+    }
+    Ok(Some(out))
+}
+
+/// Paramètres communs de lecture des défauts, validés, sous la forme attendue par le gabarit.
+fn ue_defaults_base(
+    object_path: &str,
+    section: &Option<String>,
+    component: &Option<String>,
+    names: &Option<Vec<String>>,
+    expand: &Option<Vec<String>>,
+) -> Result<Value, String> {
+    let object_path = normalize_object_path(object_path)?;
+    let section = section.as_deref().map(str::trim).unwrap_or("members");
+    if !UE_SECTIONS.contains(&section) {
+        return Err(format!(
+            "ERREUR InvalidParameter: section {section:?} inconnue (attendu: {}).",
+            UE_SECTIONS.join(", ")
+        ));
+    }
+    let component = ue_text_param("component", component)?;
+    if section == "component_values" && component.is_none() {
+        return Err(
+            "ERREUR InvalidParameter: section=\"component_values\" exige `component` (nom de variable \
+             du composant, voir section=\"components\")."
+                .into(),
+        );
+    }
+    let mut base = json!({"object_path": object_path, "section": section});
+    if let Some(c) = component {
+        base["component"] = json!(c);
+    }
+    if let Some(n) = ue_names_param("names", names, UE_MAX_NAMES)? {
+        base["names"] = json!(n);
+    }
+    if let Some(e) = ue_names_param("expand", expand, UE_MAX_EXPAND)? {
+        base["expand"] = json!(e);
+    }
+    Ok(base)
+}
+
+/// Résultat de la lecture paginée des défauts d'un asset.
+struct Fetched {
+    items: Vec<Value>,
+    /// Métadonnées de la première réponse (total, noms absents, packages sales...).
+    meta: Value,
+    warnings: Vec<Value>,
+    /// Indice de reprise si la lecture s'est arrêtée avant la fin.
+    next_index: Option<usize>,
+    commands: usize,
 }
 
 /// Chemin d'objet normalisé: "/Game/X/Y" devient "/Game/X/Y.Y". Refuse tout ce qui ne ressemble pas
@@ -365,6 +491,71 @@ impl ConanServer {
         tokio::task::spawn_blocking(move || ue_bridge::run_template(&cfg, &template, &params))
             .await
             .map_err(|e| UeError::ProtocolError(format!("tâche du pont interrompue: {e}")))?
+    }
+
+    /// Lit les défauts d'un asset commande par commande (60 éléments au plus et 2 s au plus chacune),
+    /// en suivant `next_index`, avec au plus `UE_MAX_COMMANDS` commandes.
+    async fn ue_fetch_defaults(&self, base: &Value, start: usize) -> Result<Fetched, String> {
+        let mut start = start;
+        let mut items: Vec<Value> = Vec::new();
+        let mut meta = Value::Null;
+        let mut warnings: Vec<Value> = Vec::new();
+        let mut commands = 0usize;
+        loop {
+            let mut params = base.clone();
+            params["start"] = json!(start);
+            let out = self
+                .ue_template(templates::DEFAULTS, params)
+                .await
+                .map_err(|e| ue_error_text(&e))?;
+            commands += 1;
+            // une erreur applicative du script (asset introuvable, pas un Blueprint...) est déjà devenue
+            // une erreur d'outil dans `run_template`
+            let payload = out.payload;
+            if let Some(list) = payload["items"].as_array() {
+                items.extend(list.iter().cloned());
+            }
+            if let Some(list) = payload["warnings"].as_array() {
+                warnings.extend(list.iter().cloned());
+            }
+            if meta.is_null() {
+                meta = json!({
+                    "object_path": payload["object_path"],
+                    "section": payload["section"],
+                    "total": payload["total"],
+                    "missing_names": payload["missing_names"],
+                });
+            }
+            meta["dirty_packages"] = payload["dirty_packages"].clone();
+            let next = payload["next_index"].as_u64().map(|n| n as usize);
+            match next {
+                None => {
+                    return Ok(Fetched {
+                        items,
+                        meta,
+                        warnings,
+                        next_index: None,
+                        commands,
+                    })
+                }
+                Some(n) if n <= start => {
+                    return Err(format!(
+                        "ERREUR ProtocolError: la lecture des défauts ne progresse pas (next_index={n}, \
+                         start={start}); abandon, rien n'a été modifié."
+                    ))
+                }
+                Some(n) => start = n,
+            }
+            if commands >= UE_MAX_COMMANDS {
+                return Ok(Fetched {
+                    items,
+                    meta,
+                    warnings,
+                    next_index: Some(start),
+                    commands,
+                });
+            }
+        }
     }
 
     /// Le magasin de schémas, ou une erreur d'outil explicite s'il est indisponible.
@@ -1032,21 +1223,128 @@ impl ConanServer {
                        propres au Blueprint (include_inherited=true ajoute celles des classes parentes). \
                        Charge le Blueprint indiqué (et lui seul) en mémoire sans le modifier. Limites: la \
                        valeur par défaut d'une variable objet est un chemin d'asset, les flottants simple \
-                       précision apparaissent en double. Nécessite le Devkit ouvert."
+                       précision apparaissent en double. Lecture bornée: au plus 60 variables et 2 s par \
+                       appel (suite avec `start` = `next_index`); tableaux, maps et structs ne sont pas \
+                       dépliés par défaut (`expand` pour 20 éléments au plus). Nécessite le Devkit ouvert."
     )]
     async fn ue_blueprint_variables(
         &self,
         Parameters(p): Parameters<UeBlueprintParams>,
     ) -> Result<CallToolResult, String> {
         let object_path = normalize_object_path(&p.object_path)?;
+        let expand = ue_names_param("expand", &p.expand, UE_MAX_EXPAND)?.unwrap_or_default();
         let out = self
             .ue_template(
                 templates::BLUEPRINT_VARIABLES,
-                json!({"object_path": object_path, "include_inherited": p.include_inherited.unwrap_or(false)}),
+                json!({
+                    "object_path": object_path,
+                    "include_inherited": p.include_inherited.unwrap_or(false),
+                    "start": p.start.unwrap_or(0),
+                    "expand": expand,
+                }),
             )
             .await
             .map_err(|e| ue_error_text(&e))?;
         Ok(CallToolResult::structured(without_nulls(out.payload)))
+    }
+
+    #[tool(
+        description = "LECTURE SEULE. Lit les valeurs par défaut d'un Blueprint du Devkit Unreal: section \
+                       \"members\" (défaut: toutes les propriétés, héritées comprises, lues sur le CDO, avec \
+                       type, classe propriétaire et valeur), \"components\" (composants, hérités compris) ou \
+                       \"component_values\" (propriétés d'un composant). Noms de propriétés EXACTS (comme dans \
+                       `names`), pas les noms affichés. Lecture bornée: 60 éléments et 2 s par commande, suite \
+                       automatique jusqu'à 12 commandes; `complete=false` + `next_index` si le Blueprint est \
+                       plus grand (rappeler avec `start`). Tableaux, maps et structs ne sont PAS dépliés \
+                       (longueur seulement); `expand` en déplie 20 éléments au plus. Une propriété illisible \
+                       est listée avec sa raison. Charge le Blueprint indiqué sans le modifier. Nécessite le \
+                       Devkit ouvert."
+    )]
+    async fn ue_get_defaults(
+        &self,
+        Parameters(p): Parameters<UeDefaultsParams>,
+    ) -> Result<CallToolResult, String> {
+        let base = ue_defaults_base(
+            &p.object_path,
+            &p.section,
+            &p.component,
+            &p.names,
+            &p.expand,
+        )?;
+        let f = self.ue_fetch_defaults(&base, p.start.unwrap_or(0)).await?;
+        Ok(CallToolResult::structured(without_nulls(json!({
+            "object_path": f.meta["object_path"],
+            "section": f.meta["section"],
+            "total": f.meta["total"],
+            "start": p.start.unwrap_or(0),
+            "returned": f.items.len(),
+            "complete": f.next_index.is_none(),
+            "next_index": f.next_index,
+            "commands": f.commands,
+            "missing_names": f.meta["missing_names"],
+            "dirty_packages": f.meta["dirty_packages"],
+            "warnings": f.warnings,
+            "items": f.items,
+        }))))
+    }
+
+    #[tool(
+        description = "LECTURE SEULE. Compare les valeurs par défaut de DEUX Blueprints du Devkit (mêmes \
+                       sections que ue_get_defaults). Renvoie les différences (valeur A, valeur B, type), \
+                       les propriétés présentes d'un seul côté et celles NON comparées (illisibles ou \
+                       conteneurs/structs non dépliés: `expand`). Flottants égaux à 1e-6 près, entiers \
+                       exacts. Même lecture bornée que ue_get_defaults; si un Blueprint dépasse 12 commandes, \
+                       erreur: restreindre avec `names`. Nécessite le Devkit ouvert."
+    )]
+    async fn ue_diff_defaults(
+        &self,
+        Parameters(p): Parameters<UeDiffParams>,
+    ) -> Result<CallToolResult, String> {
+        let base_a = ue_defaults_base(
+            &p.object_path_a,
+            &p.section,
+            &p.component,
+            &p.names,
+            &p.expand,
+        )?;
+        let base_b = ue_defaults_base(
+            &p.object_path_b,
+            &p.section,
+            &p.component,
+            &p.names,
+            &p.expand,
+        )?;
+        let mut fetched = Vec::new();
+        for base in [&base_a, &base_b] {
+            let f = self.ue_fetch_defaults(base, 0).await?;
+            if f.next_index.is_some() {
+                return Err(format!(
+                    "ERREUR TooLarge: {} compte plus de {} éléments à lire (limite de {UE_MAX_COMMANDS} \
+                     commandes). Restreindre la comparaison avec `names`.",
+                    base["object_path"].as_str().unwrap_or("?"),
+                    f.items.len()
+                ));
+            }
+            fetched.push(f);
+        }
+        let (a, b) = (&fetched[0], &fetched[1]);
+        let mut result = ue_defaults::diff_items(&a.items, &b.items);
+        result["a"] = json!({"object_path": base_a["object_path"], "total": a.meta["total"], "missing_names": a.meta["missing_names"]});
+        result["b"] = json!({"object_path": base_b["object_path"], "total": b.meta["total"], "missing_names": b.meta["missing_names"]});
+        result["section"] = base_a["section"].clone();
+        result["complete"] = json!(true);
+        result["commands"] = json!(a.commands + b.commands);
+        let mut dirty: Vec<Value> = Vec::new();
+        for f in [a, b] {
+            for d in f.meta["dirty_packages"].as_array().into_iter().flatten() {
+                if !dirty.contains(d) {
+                    dirty.push(d.clone());
+                }
+            }
+        }
+        result["dirty_packages"] = json!(dirty);
+        result["warnings"] = json!([a.warnings.clone(), b.warnings.clone()].concat());
+        Ok(CallToolResult::structured(without_nulls(result)))
     }
 }
 

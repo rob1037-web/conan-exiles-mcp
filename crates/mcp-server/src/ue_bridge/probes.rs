@@ -401,6 +401,10 @@ def _main():
         result["timings"] = timings
         result["member_count"] = len(qualified_names)
 
+    if "names" in tasks:
+        # Énumération seule: aucun get_editor_property, aucune conversion.
+        result["qualified_names"] = _try(warnings, "names", lambda: [str(n) for n in blueprint.list_member_variable_names()], [])
+
     if "read_state" in tasks:
         # Lecture complète des défauts (même conversion que l'inventaire), packages sales avant/après.
         result["dirty_before"] = _try(warnings, "dirty before", _dirty_packages)

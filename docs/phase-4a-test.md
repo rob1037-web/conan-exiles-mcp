@@ -120,7 +120,7 @@ Pour voir de vraies variables, essayer un Blueprint du jeu de base qui en décla
 | `ue_describe_asset` avec `Game/X` (sans `/`) | `ERREUR InvalidParameter` |
 
 Codes d'erreur du pont : `DevkitNotRunning`, `ProtocolError`, `Timeout` (connexion 5 s, commande
-30 s), `PythonError` (traceback renvoyé, 4000 caractères au plus), `SocketError`.
+15 s depuis la phase 4b), `PythonError` (traceback renvoyé, 4000 caractères au plus), `SocketError`.
 
 ## 5. Dépannage
 

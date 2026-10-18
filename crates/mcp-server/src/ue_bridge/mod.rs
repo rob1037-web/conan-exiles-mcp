@@ -106,7 +106,7 @@ impl BridgeConfig {
             project_name: Some(DEFAULT_PROJECT_NAME.to_owned()),
             discovery_timeout: Duration::from_secs(3),
             connect_timeout: Duration::from_secs(5),
-            command_timeout: Duration::from_secs(30),
+            command_timeout: Duration::from_secs(15),
         }
     }
 

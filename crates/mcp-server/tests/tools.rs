@@ -27,7 +27,7 @@ async fn write(
 }
 
 #[tokio::test]
-async fn exposes_all_thirteen_tools_with_descriptions() {
+async fn exposes_all_fifteen_tools_with_descriptions() {
     let env = Env::new();
     let s = connect(&env.config()).await;
     let tools = s.client.list_all_tools().await.unwrap();
@@ -44,6 +44,8 @@ async fn exposes_all_thirteen_tools_with_descriptions() {
             "read_datatable",
             "ue_blueprint_variables",
             "ue_describe_asset",
+            "ue_diff_defaults",
+            "ue_get_defaults",
             "ue_search_assets",
             "ue_status",
             "update_row",
