@@ -243,6 +243,14 @@ fn ue_error_text(e: &UeError) -> String {
     }
 }
 
+/// Retire les clés racine à `null` (diagnostics absents) pour garder le JSON compact.
+fn without_nulls(mut value: Value) -> Value {
+    if let Some(obj) = value.as_object_mut() {
+        obj.retain(|_, v| !v.is_null());
+    }
+    value
+}
+
 fn ue_text_param(name: &str, value: &Option<String>) -> Result<Option<String>, String> {
     match value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
         None => Ok(None),
@@ -937,29 +945,18 @@ impl ConanServer {
     async fn ue_status(&self) -> Result<CallToolResult, String> {
         match self.ue_template(templates::STATUS, json!({})).await {
             Ok(out) => {
-                let p = &out.payload;
-                let text = format!(
-                    "Devkit joignable.\nMoteur: {}\nProjet: {} ({})\nAssets dans le registre: {}\nRegistre en cours de chargement: {}\n",
-                    p["engine_version"].as_str().unwrap_or("?"),
-                    p["project_name"].as_str().unwrap_or("?"),
-                    p["project_dir"].as_str().unwrap_or("?"),
-                    p["asset_count"],
-                    p["registry_loading"]
-                );
-                let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
-                result.structured_content =
-                    Some(json!({"reachable": true, "node": out.node.data, "status": out.payload}));
-                Ok(result)
+                let mut status = out.payload;
+                if let Some(obj) = status.as_object_mut() {
+                    obj.insert("reachable".into(), json!(true));
+                    obj.insert("node".into(), out.node.data);
+                }
+                Ok(CallToolResult::structured(status))
             }
-            Err(e @ UeError::DevkitNotRunning(_)) => {
-                let mut result = CallToolResult::success(vec![ContentBlock::text(format!(
-                    "Devkit INJOIGNABLE: {e}\n"
-                ))]);
-                result.structured_content = Some(
-                    json!({"reachable": false, "error_code": e.code(), "error": e.to_string()}),
-                );
-                Ok(result)
-            }
+            Err(UeError::DevkitNotRunning(detail)) => Ok(CallToolResult::structured(json!({
+                "reachable": false,
+                "error_code": "DevkitNotRunning",
+                "error": detail,
+            }))),
             Err(e) => Err(ue_error_text(&e)),
         }
     }
@@ -969,7 +966,8 @@ impl ConanServer {
                        de base du jeu, ~85 000 assets, n'est pas visible par fichiers). Filtres facultatifs: \
                        path_prefix (ex. \"Mods/test\"), class_name (ex. \"DataTable\", \"Blueprint\"), \
                        name_contains. limit: 50 par défaut, 500 maximum. Renvoie, pour chaque asset, \
-                       object_path, classe et package, plus le nombre total trouvé. N'ouvre aucun asset. \
+                       object_path, classe et package, plus le nombre total trouvé; résultats triés par \
+                       object_path. N'ouvre aucun asset. \
                        Nécessite le Devkit ouvert (voir ue_status)."
     )]
     async fn ue_search_assets(
@@ -994,30 +992,15 @@ impl ConanServer {
         let payload = out.payload;
         let total = payload["total"].as_u64().unwrap_or(0);
         let assets = payload["assets"].as_array().cloned().unwrap_or_default();
-        let mut text = format!("{total} asset(s) trouvé(s), {} affiché(s).\n", assets.len());
-        if requested > UE_MAX_LIMIT {
-            text.push_str(&format!(
-                "(limit ramené de {requested} au maximum {UE_MAX_LIMIT})\n"
-            ));
-        }
-        for a in &assets {
-            text.push_str(&format!(
-                "  {:<22} {}\n",
-                a["class"].as_str().unwrap_or("?"),
-                a["object_path"].as_str().unwrap_or("?")
-            ));
-        }
-        if total as usize > assets.len() {
-            text.push_str("Résultats tronqués: affiner les filtres ou augmenter limit.\n");
-        }
-        let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
-        result.structured_content = Some(json!({
-            "total": total, "returned": assets.len(), "limit": limit,
+        Ok(CallToolResult::structured(json!({
+            "total": total,
+            "returned": assets.len(),
+            "limit": limit,
             "limit_clamped": requested > UE_MAX_LIMIT,
             "truncated": total as usize > assets.len(),
-            "assets": assets, "warnings": payload["warnings"],
-        }));
-        Ok(result)
+            "assets": assets,
+            "warnings": payload["warnings"],
+        })))
     }
 
     #[tool(
@@ -1039,35 +1022,7 @@ impl ConanServer {
             )
             .await
             .map_err(|e| ue_error_text(&e))?;
-        let d = &out.payload;
-        let mut text = format!(
-            "{}\nClasse: {} ({})\nPackage: {}\n",
-            d["object_path"].as_str().unwrap_or(&object_path),
-            d["class"].as_str().unwrap_or("?"),
-            d["class_package"].as_str().unwrap_or("?"),
-            d["package"].as_str().unwrap_or("?"),
-        );
-        match d["tags"].as_object() {
-            Some(tags) if !tags.is_empty() => {
-                text.push_str("Tags du registre (liste non exhaustive):\n");
-                for (k, v) in tags {
-                    let v = v.as_str().unwrap_or("");
-                    let shown: String = v.chars().take(200).collect();
-                    text.push_str(&format!("  {k} = {shown}\n"));
-                }
-            }
-            _ => text.push_str("Tags du registre: aucun parmi les tags courants interrogés.\n"),
-        }
-        text.push_str(&format!(
-            "Dépendances directes ({}):\n",
-            d["dependency_count"]
-        ));
-        for dep in d["dependencies"].as_array().into_iter().flatten().take(60) {
-            text.push_str(&format!("  {}\n", dep.as_str().unwrap_or("?")));
-        }
-        let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
-        result.structured_content = Some(out.payload);
-        Ok(result)
+        Ok(CallToolResult::structured(without_nulls(out.payload)))
     }
 
     #[tool(
@@ -1091,42 +1046,7 @@ impl ConanServer {
             )
             .await
             .map_err(|e| ue_error_text(&e))?;
-        let d = &out.payload;
-        let vars = d["variables"].as_array().cloned().unwrap_or_default();
-        let mut text = format!(
-            "{}\n{} variable(s) propre(s) au Blueprint, {} héritée(s){}.\n",
-            d["object_path"].as_str().unwrap_or(&object_path),
-            d["own_variable_count"],
-            d["inherited_variable_count"],
-            if p.include_inherited.unwrap_or(false) {
-                " (listées)"
-            } else {
-                " (non listées)"
-            },
-        );
-        if let Some(dirty) = d["package_marked_modified"].as_bool() {
-            text.push_str(&format!(
-                "Package marqué modifié dans l'éditeur après lecture: {}\n",
-                if dirty { "OUI (anormal)" } else { "non" }
-            ));
-        }
-        for v in &vars {
-            let default = if v["default_available"].as_bool().unwrap_or(false) {
-                format!(" = {}", v["default"])
-            } else {
-                String::new()
-            };
-            text.push_str(&format!(
-                "  {} : {}{}   [catégorie: {}]\n",
-                v["name"].as_str().unwrap_or("?"),
-                v["type"]["label"].as_str().unwrap_or("?"),
-                default,
-                v["category"].as_str().unwrap_or(""),
-            ));
-        }
-        let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
-        result.structured_content = Some(out.payload);
-        Ok(result)
+        Ok(CallToolResult::structured(without_nulls(out.payload)))
     }
 }
 

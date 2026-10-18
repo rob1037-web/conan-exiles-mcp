@@ -33,6 +33,12 @@ Ouvrir le Devkit et attendre la fin du chargement.
 
 ## 2. Déroulé dans Claude Desktop
 
+> Depuis la Phase 4b (étape 0), les quatre outils `ue_*` renvoient un **objet JSON compact** (le même
+> texte que le contenu structuré). Les blocs « Attendu » ci-dessous décrivent les valeurs de ces
+> champs (`engine_version`, `project_name`, `asset_count`, `assets[].object_path`, `tags`...).
+> `ue_status` avec le Devkit fermé répond `{"reachable":false,"error_code":"DevkitNotRunning","error":...}`.
+> `ue_search_assets` trie ses résultats par `object_path`.
+
 Les autorisations : « Autoriser une fois » suffit (outils en lecture seule).
 
 ### 2.1 `ue_status`

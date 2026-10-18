@@ -24,6 +24,16 @@ async fn session(node: &FakeNode) -> (Env, Session) {
     (env, s)
 }
 
+/// Le texte de la réponse est le même JSON compact que le contenu structuré (une seule ligne).
+fn assert_json_text(r: &rmcp::model::CallToolResult) {
+    let t = text(r);
+    assert!(!t.contains('\n'), "JSON compact attendu: {t}");
+    assert_eq!(
+        &serde_json::from_str::<Value>(&t).expect("texte JSON"),
+        structured(r)
+    );
+}
+
 /// Paramètres que le script a reçus: ce qui est dans le littéral de `_PARAMS = json.loads("...")`.
 fn params_of(command: &str) -> Value {
     let line = command
@@ -73,16 +83,12 @@ async fn ue_status_reports_the_editor() {
     let (_env, s) = session(&node).await;
     let r = s.call("ue_status", json!({})).await;
     assert!(!is_error(&r), "{}", text(&r));
-    assert!(
-        text(&r).starts_with("Devkit joignable")
-            && text(&r).contains("85240")
-            && text(&r).contains("5.8.2-test"),
-        "{}",
-        text(&r)
-    );
-    assert_eq!(structured(&r)["reachable"], true);
-    assert_eq!(structured(&r)["status"]["asset_count"], 85240);
-    assert_eq!(structured(&r)["node"]["project_name"], "ConanSandbox");
+    assert_json_text(&r);
+    let v = structured(&r);
+    assert_eq!(v["reachable"], true);
+    assert_eq!(v["asset_count"], 85240);
+    assert_eq!(v["engine_version"], "5.8.2-test");
+    assert_eq!(v["node"]["project_name"], "ConanSandbox");
     // une session propre: une ouverture, une fermeture
     std::thread::sleep(std::time::Duration::from_millis(150));
     assert_eq!(
@@ -100,9 +106,19 @@ async fn ue_status_with_the_devkit_closed_is_a_normal_unreachable_answer() {
     let s = connect_with_bridge(&env.config(), FakeNode::absent_config()).await;
     let r = s.call("ue_status", json!({})).await;
     assert!(!is_error(&r), "{}", text(&r));
-    assert!(text(&r).starts_with("Devkit INJOIGNABLE"), "{}", text(&r));
+    assert_json_text(&r);
     assert_eq!(structured(&r)["reachable"], false);
     assert_eq!(structured(&r)["error_code"], "DevkitNotRunning");
+    let message = structured(&r)["error"].as_str().unwrap();
+    assert!(
+        message.starts_with("aucun éditeur Unreal n'a répondu"),
+        "{message}"
+    );
+    assert!(
+        !text(&r).contains("INJOIGNABLE") && !text(&r).to_lowercase().contains("injoignable"),
+        "{}",
+        text(&r)
+    );
     // les autres outils, eux, signalent une erreur d'outil
     for (tool, args) in [
         ("ue_search_assets", json!({})),
@@ -145,14 +161,7 @@ async fn ue_search_assets_passes_json_parameters_and_formats_the_answer() {
         )
         .await;
     assert!(!is_error(&r), "{}", text(&r));
-    let t = text(&r);
-    assert!(
-        t.starts_with("899 asset(s) trouvé(s), 2 affiché(s)")
-            && t.contains("DataTable")
-            && t.contains("/Game/Items/ItemTable.ItemTable"),
-        "{t}"
-    );
-    assert!(t.contains("Résultats tronqués"));
+    assert_json_text(&r);
     assert_eq!(structured(&r)["total"], 899);
     assert_eq!(structured(&r)["truncated"], true);
 
@@ -258,13 +267,19 @@ async fn ue_describe_asset_normalizes_the_path_and_formats_tags_and_dependencies
         )
         .await;
     assert!(!is_error(&r), "{}", text(&r));
-    let t = text(&r);
+    assert_json_text(&r);
+    let v = structured(&r);
+    assert_eq!(v["class"], "StaticMesh");
+    assert_eq!(v["tags"]["Triangles"], "224");
+    assert_eq!(v["dependency_count"], 2);
+    assert!(v["dependencies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d == "/Game/Items/MI_X"));
     assert!(
-        t.contains("Classe: StaticMesh")
-            && t.contains("Triangles = 224")
-            && t.contains("/Game/Items/MI_X")
-            && t.contains("Dépendances directes (2)"),
-        "{t}"
+        v.get("asset_members").is_none(),
+        "pas de clé nulle de diagnostic"
     );
     assert_eq!(
         params_of(&seen.lock().unwrap()[0])["object_path"],
@@ -346,16 +361,12 @@ async fn ue_blueprint_variables_formats_variables_and_passes_include_inherited()
         )
         .await;
     assert!(!is_error(&r), "{}", text(&r));
-    let t = text(&r);
-    assert!(
-        t.contains("2 variable(s) propre(s)") && t.contains("121 héritée(s) (non listées)"),
-        "{t}"
-    );
-    assert!(
-        t.contains("MaxAmount : int = 1   [catégorie: Items]")
-            && t.contains("PossibleItemIDs : Array of int = [11103]"),
-        "{t}"
-    );
+    assert_json_text(&r);
+    let v = structured(&r);
+    assert_eq!(v["variables"][0]["name"], "MaxAmount");
+    assert_eq!(v["variables"][1]["type"]["label"], "Array of int");
+    assert_eq!(v["variables"][1]["default"], json!([11103]));
+    assert_eq!(v["inherited_variable_count"], 121);
     assert_eq!(structured(&r)["own_variable_count"], 2);
     s.call(
         "ue_blueprint_variables",

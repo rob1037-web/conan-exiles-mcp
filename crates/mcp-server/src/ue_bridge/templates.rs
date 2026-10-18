@@ -98,8 +98,7 @@ def _main():
                     assets.append(asset)
     else:
         assets = registry.get_all_assets()
-    total = 0
-    found = []
+    matches = []
     for asset in assets:
         name = str(asset.asset_name)
         if contains and contains not in name.lower():
@@ -107,16 +106,20 @@ def _main():
         class_name, class_package = _class_of(asset)
         if wanted_class and class_name.lower() != wanted_class:
             continue
-        total += 1
-        if len(found) < limit:
-            package = str(asset.package_name)
-            found.append({
-                "object_path": package + "." + name,
-                "class": class_name,
-                "class_package": class_package,
-                "package": package,
-                "name": name,
-            })
+        package = str(asset.package_name)
+        matches.append((package + "." + name, package, name, class_name, class_package))
+    # Tri par object_path AVANT la limite: le résultat est déterministe.
+    matches.sort(key=lambda m: m[0])
+    total = len(matches)
+    found = []
+    for object_path, package, name, class_name, class_package in matches[:limit]:
+        found.append({
+            "object_path": object_path,
+            "class": class_name,
+            "class_package": class_package,
+            "package": package,
+            "name": name,
+        })
     _emit({"total": total, "returned": len(found), "assets": found, "prefixes_tried": prefixes, "query": _PARAMS, "warnings": warnings})
 
 
@@ -530,7 +533,7 @@ class _Asset:
         self.package_path = pkg.rsplit("/", 1)[0]
     def is_valid(self): return True
     def get_tag_value(self, n): return "Valeur" if n == "Triangles" else None
-ASSETS = [_Asset("/Game/Mods/test/DT_One", "DT_One", "DataTable"), _Asset("/Game/Mods/test/SM_Box", "SM_Box", "StaticMesh"), _Asset("/Game/Other/DT_Two", "DT_Two", "DataTable")]
+ASSETS = [_Asset("/Game/Other/DT_Two", "DT_Two", "DataTable"), _Asset("/Game/Mods/test/SM_Box", "SM_Box", "StaticMesh"), _Asset("/Game/Mods/test/DT_One", "DT_One", "DataTable")]
 class _Registry:
     def get_all_assets(self): return list(ASSETS)
     def get_assets(self, f): return [a for a in ASSETS if a.package_name.startswith(f.package_paths[0])]
@@ -613,6 +616,27 @@ sys.modules["unreal"] = unreal
         assert_eq!(
             found["assets"][0]["object_path"],
             "/Game/Mods/test/DT_One.DT_One"
+        );
+        // tri par object_path (les assets du faux registre sont dans le désordre), avant la limite
+        let all = run_with_fake_unreal(&SEARCH_ASSETS, &json!({"limit": 50})).unwrap();
+        let paths: Vec<_> = all["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["object_path"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "/Game/Mods/test/DT_One.DT_One",
+                "/Game/Mods/test/SM_Box.SM_Box",
+                "/Game/Other/DT_Two.DT_Two"
+            ]
+        );
+        let first = run_with_fake_unreal(&SEARCH_ASSETS, &json!({"limit": 1})).unwrap();
+        assert_eq!(
+            (first["total"].as_u64(), first["assets"][0]["name"].as_str()),
+            (Some(3), Some("DT_One"))
         );
         let found = run_with_fake_unreal(
             &SEARCH_ASSETS,
