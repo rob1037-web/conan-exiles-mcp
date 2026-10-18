@@ -347,6 +347,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "conan-core",
+ "mcp-server",
  "rmcp",
  "serde",
  "serde_json",

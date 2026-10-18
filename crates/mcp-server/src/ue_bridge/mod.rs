@@ -9,6 +9,7 @@
 
 pub mod message;
 pub mod templates;
+#[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
 use std::collections::BTreeMap;
