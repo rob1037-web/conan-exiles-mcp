@@ -42,6 +42,10 @@ pub struct ConanServer {
     ue: Arc<BridgeConfig>,
     /// Une seule session Python Remote Execution à la fois (une session par appel d'outil).
     ue_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Garde-fou EditorBusy: la raison de la dernière commande restée en doute (délai dépassé ou
+    /// rupture de protocole après l'envoi). Tant qu'elle est posée, seuls `ue_status` et les outils
+    /// non-ue passent; seul un `ue_status` réussi la lève.
+    ue_suspect: Arc<std::sync::Mutex<Option<String>>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -470,6 +474,7 @@ impl ConanServer {
             schemas: Arc::new(schemas),
             ue: Arc::new(BridgeConfig::default_multicast()),
             ue_lock: Arc::new(tokio::sync::Mutex::new(())),
+            ue_suspect: Arc::new(std::sync::Mutex::new(None)),
             tool_router: Self::tool_router(),
         }
     }
@@ -487,10 +492,39 @@ impl ConanServer {
         params: Value,
     ) -> Result<TemplateOutput, UeError> {
         let _session = self.ue_lock.lock().await;
+        let is_status = template.name == templates::STATUS.name;
+        if !is_status {
+            if let Some(why) = self.ue_suspect_reason() {
+                return Err(UeError::EditorBusy(format!(
+                    "l'éditeur est peut-être encore occupé: une commande précédente n'a pas abouti ({why}). \
+                     Rien n'a été envoyé. NE RELANCE PAS d'outil ue_* et préviens Robin pour qu'il regarde \
+                     le Devkit (Python peut tourner encore; au-delà de 10 s l'éditeur peut planter). Seul \
+                     ue_status peut lever ce blocage, une fois l'éditeur redevenu disponible."
+                )));
+            }
+        }
         let cfg = self.ue.clone();
-        tokio::task::spawn_blocking(move || ue_bridge::run_template(&cfg, &template, &params))
-            .await
-            .map_err(|e| UeError::ProtocolError(format!("tâche du pont interrompue: {e}")))?
+        let result =
+            tokio::task::spawn_blocking(move || ue_bridge::run_template(&cfg, &template, &params))
+                .await
+                .map_err(|e| UeError::ProtocolError(format!("tâche du pont interrompue: {e}")))?;
+        match &result {
+            Err(e) if e.command_in_doubt() => self.set_ue_suspect(Some(e.to_string())),
+            Ok(_) if is_status => self.set_ue_suspect(None),
+            _ => {}
+        }
+        result
+    }
+
+    fn ue_suspect_reason(&self) -> Option<String> {
+        self.ue_suspect
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn set_ue_suspect(&self, reason: Option<String>) {
+        *self.ue_suspect.lock().unwrap_or_else(|e| e.into_inner()) = reason;
     }
 
     /// Lit les défauts d'un asset commande par commande (60 éléments au plus et 2 s au plus chacune),
@@ -1131,23 +1165,39 @@ impl ConanServer {
         description = "LECTURE SEULE. Indique si le Devkit Unreal (éditeur ouvert, Python Remote Execution \
                        activé) est joignable et renvoie la version du moteur, le projet et le nombre d'assets \
                        du registre. Si le Devkit est fermé, la réponse dit reachable=false (le démarrage de \
-                       l'éditeur prend environ 2 minutes). À appeler avant les autres outils ue_*."
+                       l'éditeur prend environ 2 minutes). À appeler avant les autres outils ue_*. Après une commande \
+                       expirée, les autres outils ue_* répondent EditorBusy jusqu'à un ue_status réussi."
     )]
     async fn ue_status(&self) -> Result<CallToolResult, String> {
+        const BUSY: &str = "éditeur peut-être occupé (commande précédente expirée)";
+        let was_suspect = self.ue_suspect_reason().is_some();
         match self.ue_template(templates::STATUS, json!({})).await {
             Ok(out) => {
                 let mut status = out.payload;
                 if let Some(obj) = status.as_object_mut() {
                     obj.insert("reachable".into(), json!(true));
                     obj.insert("node".into(), out.node.data);
+                    if was_suspect {
+                        obj.insert("busy_flag_cleared".into(), json!(true));
+                    }
                 }
                 Ok(CallToolResult::structured(status))
             }
-            Err(UeError::DevkitNotRunning(detail)) => Ok(CallToolResult::structured(json!({
-                "reachable": false,
-                "error_code": "DevkitNotRunning",
-                "error": detail,
-            }))),
+            Err(UeError::DevkitNotRunning(detail)) => {
+                let mut r = json!({
+                    "reachable": false,
+                    "error_code": "DevkitNotRunning",
+                    "error": detail,
+                });
+                if self.ue_suspect_reason().is_some() {
+                    r["busy_suspected"] = json!(true);
+                    r["note"] = json!(BUSY);
+                }
+                Ok(CallToolResult::structured(r))
+            }
+            Err(e) if self.ue_suspect_reason().is_some() => {
+                Err(format!("{} — {BUSY}", ue_error_text(&e)))
+            }
             Err(e) => Err(ue_error_text(&e)),
         }
     }

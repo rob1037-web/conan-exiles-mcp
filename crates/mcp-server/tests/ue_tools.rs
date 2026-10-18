@@ -709,3 +709,162 @@ async fn ue_diff_defaults_refuses_a_blueprint_too_large_to_read_in_one_call() {
         text(&r)
     );
 }
+
+// ---- Garde-fou EditorBusy ----
+
+fn short_timeout(node: &FakeNode) -> mcp_server::ue_bridge::BridgeConfig {
+    let mut cfg = node.config();
+    cfg.command_timeout = std::time::Duration::from_millis(300);
+    cfg
+}
+
+/// Faux éditeur muet tant que `answer` est faux, puis répondant à `payload`.
+fn node_silent_until(answer: Arc<std::sync::atomic::AtomicBool>, payload: Value) -> FakeNode {
+    FakeNode::start(Behavior::default(), move |_| {
+        if answer.load(Ordering::SeqCst) {
+            Reply::printing(&format!("{MARKER_BEGIN}{payload}{MARKER_END}"))
+        } else {
+            Reply::Silence
+        }
+    })
+}
+
+#[tokio::test]
+async fn after_a_command_timeout_ue_tools_refuse_without_sending_until_ue_status_succeeds() {
+    let answer = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let node = node_silent_until(
+        answer.clone(),
+        json!({"engine_version": "5.8.2-test", "project_name": "ConanSandbox", "total": 0, "assets": [], "warnings": []}),
+    );
+    let env = Env::new();
+    let s = connect_with_bridge(&env.config(), short_timeout(&node)).await;
+
+    // 1. l'éditeur ne répond pas: Timeout, le drapeau est posé
+    let r = s.call("ue_search_assets", json!({})).await;
+    assert!(
+        is_error(&r) && text(&r).starts_with("ERREUR Timeout:"),
+        "{}",
+        text(&r)
+    );
+    assert_eq!(node.opens.load(Ordering::SeqCst), 1);
+
+    // 2. tous les outils ue_* sauf ue_status refusent et n'envoient RIEN (ni ping, ni connexion)
+    let (opens, pings, commands) = (
+        node.opens.load(Ordering::SeqCst),
+        node.pings.load(Ordering::SeqCst),
+        node.commands.lock().unwrap().len(),
+    );
+    for (tool, args) in [
+        ("ue_search_assets", json!({})),
+        ("ue_describe_asset", json!({"object_path": "/Game/X.X"})),
+        (
+            "ue_blueprint_variables",
+            json!({"object_path": "/Game/X.X"}),
+        ),
+        ("ue_get_defaults", json!({"object_path": "/Game/X.X"})),
+        (
+            "ue_diff_defaults",
+            json!({"object_path_a": "/Game/A.A", "object_path_b": "/Game/B.B"}),
+        ),
+    ] {
+        let r = s.call(tool, args).await;
+        let t = text(&r);
+        assert!(
+            is_error(&r)
+                && t.starts_with("ERREUR EditorBusy:")
+                && t.contains("NE RELANCE PAS")
+                && t.contains("Robin"),
+            "{tool}: {t}"
+        );
+    }
+    assert_eq!(
+        (
+            node.opens.load(Ordering::SeqCst),
+            node.pings.load(Ordering::SeqCst),
+            node.commands.lock().unwrap().len()
+        ),
+        (opens, pings, commands),
+        "aucun message envoyé à l'éditeur pendant le refus"
+    );
+    // les outils qui n'utilisent pas l'éditeur continuent de marcher
+    let r = s.call("list_schemas", json!({})).await;
+    assert!(!is_error(&r), "{}", text(&r));
+
+    // 3. ue_status échoue (l'éditeur est toujours muet): il le dit et le drapeau reste posé
+    let r = s.call("ue_status", json!({})).await;
+    assert!(
+        is_error(&r) && text(&r).contains("éditeur peut-être occupé (commande précédente expirée)"),
+        "{}",
+        text(&r)
+    );
+    let r = s.call("ue_search_assets", json!({})).await;
+    assert!(text(&r).starts_with("ERREUR EditorBusy:"), "{}", text(&r));
+
+    // 4. l'éditeur répond de nouveau: ue_status réussit et lève le drapeau
+    answer.store(true, Ordering::SeqCst);
+    let r = s.call("ue_status", json!({})).await;
+    assert!(!is_error(&r), "{}", text(&r));
+    assert_eq!(structured(&r)["reachable"], true);
+    assert_eq!(structured(&r)["busy_flag_cleared"], true);
+    let r = s.call("ue_search_assets", json!({})).await;
+    assert!(!is_error(&r), "{}", text(&r));
+    // un ue_status ordinaire n'annonce rien
+    let r = s.call("ue_status", json!({})).await;
+    assert!(structured(&r).get("busy_flag_cleared").is_none());
+}
+
+#[tokio::test]
+async fn a_protocol_break_after_sending_also_sets_the_flag_but_other_errors_do_not() {
+    // rupture de protocole après l'envoi: drapeau
+    for reply in [
+        Reply::Garbage,
+        Reply::Hangup,
+        Reply::printing("pas de marqueurs"),
+    ] {
+        let node = FakeNode::start(Behavior::default(), move |_| reply.clone());
+        let env = Env::new();
+        let s = connect_with_bridge(&env.config(), node.config()).await;
+        let r = s.call("ue_search_assets", json!({})).await;
+        assert!(
+            text(&r).starts_with("ERREUR ProtocolError:"),
+            "{}",
+            text(&r)
+        );
+        let r = s.call("ue_search_assets", json!({})).await;
+        assert!(text(&r).starts_with("ERREUR EditorBusy:"), "{}", text(&r));
+    }
+    // une erreur Python (l'éditeur a répondu) ne pose pas le drapeau
+    let node = FakeNode::start(Behavior::default(), |_| Reply::PythonError {
+        traceback: "Traceback: boum".into(),
+    });
+    let env = Env::new();
+    let s = connect_with_bridge(&env.config(), node.config()).await;
+    for _ in 0..2 {
+        let r = s.call("ue_search_assets", json!({})).await;
+        assert!(text(&r).starts_with("ERREUR PythonError:"), "{}", text(&r));
+    }
+    // un éditeur absent (découverte) ne pose pas le drapeau
+    let env = Env::new();
+    let s = connect_with_bridge(&env.config(), FakeNode::absent_config()).await;
+    for _ in 0..2 {
+        let r = s.call("ue_search_assets", json!({})).await;
+        assert!(
+            text(&r).starts_with("ERREUR DevkitNotRunning:"),
+            "{}",
+            text(&r)
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_chained_read_stops_sending_after_the_first_timeout() {
+    // ue_get_defaults enchaîne des commandes: la première expire, la suivante n'est jamais envoyée
+    let node = FakeNode::start(Behavior::default(), |_| Reply::Silence);
+    let env = Env::new();
+    let s = connect_with_bridge(&env.config(), short_timeout(&node)).await;
+    let r = s
+        .call("ue_get_defaults", json!({"object_path": "/Game/BP_X"}))
+        .await;
+    assert!(text(&r).starts_with("ERREUR Timeout:"), "{}", text(&r));
+    assert_eq!(node.commands.lock().unwrap().len(), 1);
+}

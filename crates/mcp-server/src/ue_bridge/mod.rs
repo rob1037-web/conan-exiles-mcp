@@ -52,7 +52,14 @@ pub enum UeError {
     /// Impossible d'ouvrir les sockets locaux.
     #[error("erreur réseau locale: {0}")]
     Socket(String),
+    /// Refus local, sans rien envoyer: une commande précédente n'a pas abouti et l'éditeur est peut-être
+    /// encore occupé (voir `ConanServer`, drapeau « suspect »).
+    #[error("{0}")]
+    EditorBusy(String),
 }
+
+/// Étape « exécution » d'une commande, pour les délais dépassés après l'envoi.
+pub const STAGE_COMMAND: &str = "exécution de la commande dans l'éditeur";
 
 impl UeError {
     pub fn code(&self) -> &'static str {
@@ -62,6 +69,19 @@ impl UeError {
             UeError::Timeout { .. } => "Timeout",
             UeError::PythonError(_) => "PythonError",
             UeError::Socket(_) => "SocketError",
+            UeError::EditorBusy(_) => "EditorBusy",
+        }
+    }
+
+    /// La commande est-elle peut-être encore en cours dans l'éditeur ? Vrai pour un délai dépassé
+    /// pendant l'exécution et pour toute rupture de protocole (envoi, lecture, réponse illisible):
+    /// on ne sait pas si Python tourne encore. Faux pour la découverte, la connexion, une erreur
+    /// Python (l'éditeur a répondu) et les erreurs locales.
+    pub fn command_in_doubt(&self) -> bool {
+        match self {
+            UeError::Timeout { stage, .. } => *stage == STAGE_COMMAND,
+            UeError::ProtocolError(_) => true,
+            _ => false,
         }
     }
 }
@@ -425,7 +445,7 @@ fn read_json_message(stream: &mut TcpStream, timeout: Duration) -> Result<Value,
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(UeError::Timeout {
-                stage: "exécution de la commande dans l'éditeur",
+                stage: STAGE_COMMAND,
                 secs: timeout.as_secs_f64(),
             });
         }
@@ -451,7 +471,7 @@ fn read_json_message(stream: &mut TcpStream, timeout: Duration) -> Result<Value,
                 ) =>
             {
                 return Err(UeError::Timeout {
-                    stage: "exécution de la commande dans l'éditeur",
+                    stage: STAGE_COMMAND,
                     secs: timeout.as_secs_f64(),
                 })
             }

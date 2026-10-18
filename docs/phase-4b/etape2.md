@@ -46,6 +46,32 @@ Tout est en **lecture seule**. Aucun enregistrement, aucune compilation. Les gab
 - Outils : pagination, 12 commandes puis reprise par `start`, validation des paramètres avant tout envoi, curseur
   bloqué refusé, différences avec tolérance flottante.
 
+## Garde-fou `EditorBusy` (commande expirée)
+
+Quand Rust abandonne (délai de 15 s), **Python peut tourner encore** dans l'éditeur : le délai ne l'interrompt pas, et
+un éditeur occupé ne répond sans doute pas aux pings (non mesuré). Sans garde-fou, l'appel suivant échouerait avec un
+`DevkitNotRunning` trompeur, ou enverrait une commande de plus à un éditeur déjà bloqué.
+
+- **Le drapeau « suspect » est posé** (dans `ConanServer`, en mémoire) dans deux cas, après l'envoi de la commande :
+  1. `Timeout` à l'étape « exécution de la commande dans l'éditeur » ;
+  2. toute `ProtocolError` (connexion fermée, JSON illisible ou trop gros, mauvais type de message, `success`
+     manquant, marqueurs absents de la sortie ; l'échec d'écriture de la commande compte aussi, par prudence).
+  Ne le posent pas : la découverte (`DevkitNotRunning`), l'expiration de la connexion TCP (rien n'est parti), une
+  erreur Python (l'éditeur a répondu) et les erreurs de socket locales.
+- **Drapeau posé** : tous les outils `ue_*` sauf `ue_status` répondent `ERREUR EditorBusy: …` **sans rien envoyer**
+  (ni ping, ni connexion, ni commande). Le message dit de ne pas relancer et de prévenir Robin. Une lecture enchaînée
+  (`ue_get_defaults`, `ue_diff_defaults`) s'arrête donc à la commande suivante. Les outils CSV/schémas ne sont pas
+  concernés.
+- **Levée** : seul un `ue_status` **réussi** lève le drapeau (la réponse contient alors `busy_flag_cleared:true`).
+  Un `ue_status` en échec le garde et l'indique : « éditeur peut-être occupé (commande précédente expirée) » (champ
+  `note` / `busy_suspected:true` si l'éditeur ne répond pas du tout, ou suffixe du message d'erreur).
+- Pas d'expiration automatique : le drapeau survit tant que `ue_status` n'a pas réussi, y compris si l'éditeur a
+  vraiment été fermé (relancer le Devkit, puis `ue_status`).
+- Redémarrer le serveur MCP (Claude Desktop) remet aussi le drapeau à zéro ; ce n'est pas la procédure normale.
+- Tests : `tests/ue_tools.rs` (faux éditeur muet : l'outil suivant n'envoie rien, `ue_status` en échec garde le
+  drapeau, `ue_status` réussi le lève ; ruptures de protocole ; erreurs qui ne posent pas le drapeau ; lecture
+  enchaînée interrompue).
+
 ## Validation (à faire sur signal de Robin, après les commits et le déploiement de l'exe — NON exécutée)
 
 Préalable : l'exe déployé expose **15 outils** (`tools/list`). Ordre à respecter ; s'arrêter au premier écart,
