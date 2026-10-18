@@ -60,5 +60,16 @@ Puis **terminer TOUS les processus Claude** (Gestionnaire des tâches → onglet
 | `validate_rows` | Valide des lignes (ou le CSV existant) contre le schéma, sans rien écrire. |
 | `write_datatable` | Écrit un CSV sous `CSV_ROOT`, **validé par schéma**. Aperçu (diff + rapport) par défaut ; écriture réelle seulement avec `dry_run=false` ET `confirm=true`. Sauvegarde dans `.backup` avant tout remplacement. |
 
+Outils Phase 4a, **lecture seule** sur le Devkit ouvert (voir [phase-4a-test.md](phase-4a-test.md)) :
+
+| Outil | Rôle |
+|---|---|
+| `ue_status` | Devkit joignable ? version du moteur, projet, nombre d'assets du registre |
+| `ue_search_assets` | Cherche dans l'Asset Registry (`path_prefix`, `class_name`, `name_contains`, `limit` 50 / max 500) |
+| `ue_describe_asset` | Classe, package, tags du registre et dépendances directes d'un asset (sans le charger) |
+| `ue_blueprint_variables` | Variables d'un Blueprint : nom, type, catégorie, valeur par défaut |
+
+Variable facultative : `UE_PROJECT_NAME` (défaut `ConanSandbox`).
+
 Mode d'emploi complet : [MODE_EMPLOI.md](MODE_EMPLOI.md). L'import CSV → DataTable reste manuel
 dans le Devkit.

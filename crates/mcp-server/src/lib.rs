@@ -8,6 +8,8 @@
 //! Les erreurs du noyau sont renvoyées comme **erreurs d'outil MCP** (`isError: true`) avec
 //! un texte `ERREUR <code>: <message lisible>`, jamais comme panic ni erreur de protocole.
 
+pub mod ue_bridge;
+
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -23,6 +25,7 @@ use rmcp::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use ue_bridge::{templates, BridgeConfig, TemplateOutput, UeError};
 
 /// Lignes renvoyées par défaut / au maximum par `read_datatable`.
 const DEFAULT_ROWS: usize = 500;
@@ -34,6 +37,10 @@ pub struct ConanServer {
     mod_reader: Arc<ModReader>,
     /// Les schémas, ou la raison pour laquelle ils sont indisponibles (écritures refusées).
     schemas: Arc<Result<SchemaStore, String>>,
+    /// Pont vers le Devkit (Phase 4a, lecture seule).
+    ue: Arc<BridgeConfig>,
+    /// Une seule session Python Remote Execution à la fois (une session par appel d'outil).
+    ue_lock: Arc<tokio::sync::Mutex<()>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -190,6 +197,99 @@ fn values_to_text(
         .collect()
 }
 
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct UeSearchParams {
+    /// Préfixe du dossier de l'asset, avec ou sans "/Game" (ex. "Mods/test", "/Game/Items").
+    pub path_prefix: Option<String>,
+    /// Nom exact de la classe, casse ignorée (ex. "DataTable", "Blueprint", "StaticMesh").
+    pub class_name: Option<String>,
+    /// Sous-chaîne du nom de l'asset, casse ignorée.
+    pub name_contains: Option<String>,
+    /// Nombre maximal de résultats renvoyés (défaut 50, maximum 500).
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct UeAssetParams {
+    /// Chemin d'objet de l'asset, tel que renvoyé par ue_search_assets
+    /// (ex. "/Game/Mods/test/test/Mailbox/BP_PL_Mailbox.BP_PL_Mailbox").
+    pub object_path: String,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct UeBlueprintParams {
+    /// Chemin d'objet du Blueprint (ex. "/Game/Mods/test/test/Mailbox/BP_PL_Mailbox.BP_PL_Mailbox").
+    pub object_path: String,
+    /// Lister aussi les variables héritées des classes parentes (défaut false: seulement celles
+    /// déclarées dans ce Blueprint).
+    pub include_inherited: Option<bool>,
+}
+
+const UE_DEFAULT_LIMIT: usize = 50;
+const UE_MAX_LIMIT: usize = 500;
+const UE_MAX_TEXT: usize = 512;
+const UE_MAX_TRACEBACK: usize = 4000;
+
+fn ue_error_text(e: &UeError) -> String {
+    match e {
+        UeError::PythonError(trace) => {
+            let shown: String = trace.chars().take(UE_MAX_TRACEBACK).collect();
+            format!("ERREUR {}: erreur Python dans l'éditeur (lecture seule, rien n'a été modifié):\n{shown}", e.code())
+        }
+        other => format!("ERREUR {}: {other}", other.code()),
+    }
+}
+
+fn ue_text_param(name: &str, value: &Option<String>) -> Result<Option<String>, String> {
+    match value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some(v) if v.chars().count() > UE_MAX_TEXT => Err(format!(
+            "ERREUR InvalidParameter: {name} dépasse {UE_MAX_TEXT} caractères."
+        )),
+        Some(v) => Ok(Some(v.to_owned())),
+    }
+}
+
+/// Chemin d'objet normalisé: "/Game/X/Y" devient "/Game/X/Y.Y". Refuse tout ce qui ne ressemble pas
+/// à un chemin d'asset Unreal.
+fn normalize_object_path(raw: &str) -> Result<String, String> {
+    let path = raw.trim();
+    let bad = |why: &str| {
+        Err(format!(
+            "ERREUR InvalidParameter: object_path {raw:?} refusé ({why}). Attendu: un chemin d'objet Unreal \
+             comme \"/Game/Mods/test/test/Mailbox/BP_PL_Mailbox.BP_PL_Mailbox\" (voir ue_search_assets)."
+        ))
+    };
+    if path.is_empty() || path.chars().count() > UE_MAX_TEXT {
+        return bad("vide ou trop long");
+    }
+    if !path.starts_with('/') {
+        return bad("doit commencer par '/'");
+    }
+    if path.chars().any(|c| {
+        c.is_control()
+            || c.is_whitespace()
+            || matches!(c, '"' | '\'' | '\\' | '<' | '>' | '|' | '?' | '*')
+    }) {
+        return bad("caractère interdit");
+    }
+    if path.contains("..") || path.ends_with('/') {
+        return bad("chemin invalide");
+    }
+    if path
+        .rsplit('/')
+        .next()
+        .is_some_and(|last| last.contains('.'))
+    {
+        return Ok(path.to_owned());
+    }
+    let last = path.rsplit('/').next().unwrap_or(path);
+    Ok(format!("{path}.{last}"))
+}
+
 fn error_text(e: &StoreError) -> String {
     format!("ERREUR {}: {e}", e.code())
 }
@@ -234,8 +334,29 @@ impl ConanServer {
             store: Arc::new(store),
             mod_reader: Arc::new(mod_reader),
             schemas: Arc::new(schemas),
+            ue: Arc::new(BridgeConfig::default_multicast()),
+            ue_lock: Arc::new(tokio::sync::Mutex::new(())),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Remplace la configuration du pont vers le Devkit (projet visé, délais, découverte).
+    pub fn with_bridge(mut self, bridge: BridgeConfig) -> Self {
+        self.ue = Arc::new(bridge);
+        self
+    }
+
+    /// Exécute un gabarit figé dans l'éditeur: une session, hors du runtime async.
+    async fn ue_template(
+        &self,
+        template: templates::Template,
+        params: Value,
+    ) -> Result<TemplateOutput, UeError> {
+        let _session = self.ue_lock.lock().await;
+        let cfg = self.ue.clone();
+        tokio::task::spawn_blocking(move || ue_bridge::run_template(&cfg, &template, &params))
+            .await
+            .map_err(|e| UeError::ProtocolError(format!("tâche du pont interrompue: {e}")))?
     }
 
     /// Le magasin de schémas, ou une erreur d'outil explicite s'il est indisponible.
@@ -806,6 +927,207 @@ impl ConanServer {
             )
         })
     }
+
+    #[tool(
+        description = "LECTURE SEULE. Indique si le Devkit Unreal (éditeur ouvert, Python Remote Execution \
+                       activé) est joignable et renvoie la version du moteur, le projet et le nombre d'assets \
+                       du registre. Si le Devkit est fermé, la réponse dit reachable=false (le démarrage de \
+                       l'éditeur prend environ 2 minutes). À appeler avant les autres outils ue_*."
+    )]
+    async fn ue_status(&self) -> Result<CallToolResult, String> {
+        match self.ue_template(templates::STATUS, json!({})).await {
+            Ok(out) => {
+                let p = &out.payload;
+                let text = format!(
+                    "Devkit joignable.\nMoteur: {}\nProjet: {} ({})\nAssets dans le registre: {}\nRegistre en cours de chargement: {}\n",
+                    p["engine_version"].as_str().unwrap_or("?"),
+                    p["project_name"].as_str().unwrap_or("?"),
+                    p["project_dir"].as_str().unwrap_or("?"),
+                    p["asset_count"],
+                    p["registry_loading"]
+                );
+                let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+                result.structured_content =
+                    Some(json!({"reachable": true, "node": out.node.data, "status": out.payload}));
+                Ok(result)
+            }
+            Err(e @ UeError::DevkitNotRunning(_)) => {
+                let mut result = CallToolResult::success(vec![ContentBlock::text(format!(
+                    "Devkit INJOIGNABLE: {e}\n"
+                ))]);
+                result.structured_content = Some(
+                    json!({"reachable": false, "error_code": e.code(), "error": e.to_string()}),
+                );
+                Ok(result)
+            }
+            Err(e) => Err(ue_error_text(&e)),
+        }
+    }
+
+    #[tool(
+        description = "LECTURE SEULE. Cherche des assets dans l'Asset Registry du Devkit Unreal (le contenu \
+                       de base du jeu, ~85 000 assets, n'est pas visible par fichiers). Filtres facultatifs: \
+                       path_prefix (ex. \"Mods/test\"), class_name (ex. \"DataTable\", \"Blueprint\"), \
+                       name_contains. limit: 50 par défaut, 500 maximum. Renvoie, pour chaque asset, \
+                       object_path, classe et package, plus le nombre total trouvé. N'ouvre aucun asset. \
+                       Nécessite le Devkit ouvert (voir ue_status)."
+    )]
+    async fn ue_search_assets(
+        &self,
+        Parameters(p): Parameters<UeSearchParams>,
+    ) -> Result<CallToolResult, String> {
+        let prefix = ue_text_param("path_prefix", &p.path_prefix)?;
+        let class = ue_text_param("class_name", &p.class_name)?;
+        let contains = ue_text_param("name_contains", &p.name_contains)?;
+        let requested = p.limit.unwrap_or(UE_DEFAULT_LIMIT);
+        if requested == 0 {
+            return Err("ERREUR InvalidParameter: limit doit être au moins 1.".to_owned());
+        }
+        let limit = requested.min(UE_MAX_LIMIT);
+        let out = self
+            .ue_template(
+                templates::SEARCH_ASSETS,
+                json!({"path_prefix": prefix, "class_name": class, "name_contains": contains, "limit": limit}),
+            )
+            .await
+            .map_err(|e| ue_error_text(&e))?;
+        let payload = out.payload;
+        let total = payload["total"].as_u64().unwrap_or(0);
+        let assets = payload["assets"].as_array().cloned().unwrap_or_default();
+        let mut text = format!("{total} asset(s) trouvé(s), {} affiché(s).\n", assets.len());
+        if requested > UE_MAX_LIMIT {
+            text.push_str(&format!(
+                "(limit ramené de {requested} au maximum {UE_MAX_LIMIT})\n"
+            ));
+        }
+        for a in &assets {
+            text.push_str(&format!(
+                "  {:<22} {}\n",
+                a["class"].as_str().unwrap_or("?"),
+                a["object_path"].as_str().unwrap_or("?")
+            ));
+        }
+        if total as usize > assets.len() {
+            text.push_str("Résultats tronqués: affiner les filtres ou augmenter limit.\n");
+        }
+        let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+        result.structured_content = Some(json!({
+            "total": total, "returned": assets.len(), "limit": limit,
+            "limit_clamped": requested > UE_MAX_LIMIT,
+            "truncated": total as usize > assets.len(),
+            "assets": assets, "warnings": payload["warnings"],
+        }));
+        Ok(result)
+    }
+
+    #[tool(
+        description = "LECTURE SEULE. Décrit un asset du Devkit Unreal à partir de l'Asset Registry, SANS le \
+                       charger: classe, package, tags du registre (liste de tags courants: RowStructure pour \
+                       une DataTable, ParentClass pour un Blueprint, Triangles/Vertices pour un mesh...; \
+                       l'API Python ne permet pas d'énumérer tous les tags) et dépendances directes. \
+                       object_path vient de ue_search_assets. Nécessite le Devkit ouvert."
+    )]
+    async fn ue_describe_asset(
+        &self,
+        Parameters(p): Parameters<UeAssetParams>,
+    ) -> Result<CallToolResult, String> {
+        let object_path = normalize_object_path(&p.object_path)?;
+        let out = self
+            .ue_template(
+                templates::DESCRIBE_ASSET,
+                json!({"object_path": object_path}),
+            )
+            .await
+            .map_err(|e| ue_error_text(&e))?;
+        let d = &out.payload;
+        let mut text = format!(
+            "{}\nClasse: {} ({})\nPackage: {}\n",
+            d["object_path"].as_str().unwrap_or(&object_path),
+            d["class"].as_str().unwrap_or("?"),
+            d["class_package"].as_str().unwrap_or("?"),
+            d["package"].as_str().unwrap_or("?"),
+        );
+        match d["tags"].as_object() {
+            Some(tags) if !tags.is_empty() => {
+                text.push_str("Tags du registre (liste non exhaustive):\n");
+                for (k, v) in tags {
+                    let v = v.as_str().unwrap_or("");
+                    let shown: String = v.chars().take(200).collect();
+                    text.push_str(&format!("  {k} = {shown}\n"));
+                }
+            }
+            _ => text.push_str("Tags du registre: aucun parmi les tags courants interrogés.\n"),
+        }
+        text.push_str(&format!(
+            "Dépendances directes ({}):\n",
+            d["dependency_count"]
+        ));
+        for dep in d["dependencies"].as_array().into_iter().flatten().take(60) {
+            text.push_str(&format!("  {}\n", dep.as_str().unwrap_or("?")));
+        }
+        let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+        result.structured_content = Some(out.payload);
+        Ok(result)
+    }
+
+    #[tool(
+        description = "LECTURE SEULE. Liste les variables déclarées dans un Blueprint du Devkit Unreal: nom, \
+                       type (int, bool, real(double), name, text, object<Classe>, Array of ...), catégorie, \
+                       réplication et valeur par défaut lue sur le CDO. Par défaut seulement les variables \
+                       propres au Blueprint (include_inherited=true ajoute celles des classes parentes). \
+                       Charge le Blueprint indiqué (et lui seul) en mémoire sans le modifier. Limites: la \
+                       valeur par défaut d'une variable objet est un chemin d'asset, les flottants simple \
+                       précision apparaissent en double. Nécessite le Devkit ouvert."
+    )]
+    async fn ue_blueprint_variables(
+        &self,
+        Parameters(p): Parameters<UeBlueprintParams>,
+    ) -> Result<CallToolResult, String> {
+        let object_path = normalize_object_path(&p.object_path)?;
+        let out = self
+            .ue_template(
+                templates::BLUEPRINT_VARIABLES,
+                json!({"object_path": object_path, "include_inherited": p.include_inherited.unwrap_or(false)}),
+            )
+            .await
+            .map_err(|e| ue_error_text(&e))?;
+        let d = &out.payload;
+        let vars = d["variables"].as_array().cloned().unwrap_or_default();
+        let mut text = format!(
+            "{}\n{} variable(s) propre(s) au Blueprint, {} héritée(s){}.\n",
+            d["object_path"].as_str().unwrap_or(&object_path),
+            d["own_variable_count"],
+            d["inherited_variable_count"],
+            if p.include_inherited.unwrap_or(false) {
+                " (listées)"
+            } else {
+                " (non listées)"
+            },
+        );
+        if let Some(dirty) = d["package_marked_modified"].as_bool() {
+            text.push_str(&format!(
+                "Package marqué modifié dans l'éditeur après lecture: {}\n",
+                if dirty { "OUI (anormal)" } else { "non" }
+            ));
+        }
+        for v in &vars {
+            let default = if v["default_available"].as_bool().unwrap_or(false) {
+                format!(" = {}", v["default"])
+            } else {
+                String::new()
+            };
+            text.push_str(&format!(
+                "  {} : {}{}   [catégorie: {}]\n",
+                v["name"].as_str().unwrap_or("?"),
+                v["type"]["label"].as_str().unwrap_or("?"),
+                default,
+                v["category"].as_str().unwrap_or(""),
+            ));
+        }
+        let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+        result.structured_content = Some(out.payload);
+        Ok(result)
+    }
 }
 
 fn structured_write(
@@ -848,7 +1170,8 @@ impl ServerHandler for ConanServer {
                  Toute écriture est validée contre le schéma de la table (list_schemas, \
                  describe_schema, validate_rows) et commence par un aperçu (dry_run, défaut): \
                  présentez le diff et le rapport de validation avant de demander dry_run=false + \
-                 confirm=true. Pour agir sur une seule ligne, préférez add_row, update_row ou \
+                 confirm=true. Les outils ue_* interrogent le Devkit Unreal ouvert, en lecture seule. \
+                 Pour agir sur une seule ligne, préférez add_row, update_row ou \
                  delete_row à write_datatable (qui remplace le fichier entier). L'import CSV -> DataTable reste manuel dans le Devkit.",
             )
     }
@@ -881,8 +1204,8 @@ pub fn build_server(config: &Config) -> anyhow::Result<ConanServer> {
 pub fn build_server_from_vars(
     get: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> anyhow::Result<ConanServer> {
-    let config = Config::from_vars(get).context("configuration invalide")?;
-    build_server(&config)
+    let config = Config::from_vars(&get).context("configuration invalide")?;
+    Ok(build_server(&config)?.with_bridge(BridgeConfig::from_vars(&get)))
 }
 
 #[cfg(test)]

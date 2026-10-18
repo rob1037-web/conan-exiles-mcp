@@ -27,7 +27,18 @@ pub struct Session {
 
 /// Démarre un serveur configuré par `config` et y connecte un client en mémoire.
 pub async fn connect(config: &Config) -> Session {
-    let server = build_server(config).expect("serveur");
+    connect_server(build_server(config).expect("serveur")).await
+}
+
+/// Comme `connect`, avec un pont Devkit explicite (faux éditeur local des tests).
+pub async fn connect_with_bridge(
+    config: &Config,
+    bridge: mcp_server::ue_bridge::BridgeConfig,
+) -> Session {
+    connect_server(build_server(config).expect("serveur").with_bridge(bridge)).await
+}
+
+async fn connect_server(server: mcp_server::ConanServer) -> Session {
     let (client_write, server_read) = tokio::io::duplex(1 << 20);
     let (server_write, client_read) = tokio::io::duplex(1 << 20);
     tokio::spawn(async move {
