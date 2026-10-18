@@ -72,7 +72,7 @@ un éditeur occupé ne répond sans doute pas aux pings (non mesuré). Sans gard
   drapeau, `ue_status` réussi le lève ; ruptures de protocole ; erreurs qui ne posent pas le drapeau ; lecture
   enchaînée interrompue).
 
-## Validation (à faire sur signal de Robin, après les commits et le déploiement de l'exe — NON exécutée)
+## Procédure de validation (exécutée le 18 octobre, résultats plus bas)
 
 Préalable : l'exe déployé expose **15 outils** (`tools/list`). Ordre à respecter ; s'arrêter au premier écart,
 sans réessayer.
@@ -93,3 +93,45 @@ sans réessayer.
 `ue_blueprint_variables` reste interdit sur le coffre dans ce passage.
 
 Temps attendu par commande : bien moins de 2 s. Au-delà de 10 s, l'éditeur plante (watchdog audio, voir `sonde.md`).
+
+## Résultats de la validation (18 octobre, Devkit ouvert, exe déployé = exe du commit 4)
+
+Pilotage : `validation/mcp_seq.py` (session MCP réelle sur `mcp-server.exe`, appels séquentiels, arrêt au premier KO)
+et `validation/chest_batches.py` (coffre lot par lot via `ue_spike`). Sorties complètes conservées hors dépôt (dossier
+`CONAN_VAL_OUT`). Aucun enregistrement, aucune compilation. Éditeur sans Timeout ni plantage, garde-fou `EditorBusy`
+jamais déclenché.
+
+| Étape | Résultat | Durée | Détail |
+|---|---|---|---|
+| 0. `tools/list` | OK | – | 15 outils |
+| 1. `ue_status` | OK | 1,45 s | joignable, `ConanSandbox`, moteur 5.8.2, Python 3.11.8, 85 240 assets |
+| 2a. `ue_get_defaults` membres, `BP_Test` | OK | 2,92 s | 121 membres, 3 commandes, `complete:true`, `dirty_packages:[]` ; 61 lisibles, 60 illisibles |
+| 2b. `ue_get_defaults` composants, `BP_Test` | OK | 1,09 s | 2 éléments (`Default__BP_Test_C`, `DefaultSceneRoot`) |
+| 3. `ue_diff_defaults` `BP_Test` / `BP_Test` | OK | 6,52 s | 6 commandes, `different:0`, `only_in_*`:0, `identical` 50 + `not_compared` 71 = **121** (71 = 60 illisibles + 11 conteneurs ou structs non dépliés) |
+| 4. `ue_blueprint_variables` `BP_Test` | OK | 1,09 s | `warnings:[]`, `package_marked_modified:false`, aucune variable propre |
+| 4b. même outil, `include_inherited:true` | OK | 0,89 / 1,09 / 1,10 s | fenêtres `start` 0, 60, 120 : 121 variables ; `next_index` 60, 120, absent |
+| 5. packages sales | OK | 0,80 s (modifié), puis lecture après annulation | voir ci-dessous |
+| 6. coffre, lot par lot | OK | 1,10 à 1,22 s par lot | 5 lots (60, 60, 60, 60, 5) = 245 membres : 171 lisibles, 74 illisibles ; `dirty_packages:[]` |
+| 7. coffre, `ue_get_defaults` enchaîné (MCP) | OK | 5,18 s | 5 commandes, `complete:true`, 245 membres : 171 lisibles, 74 illisibles ; `MaxHealth` 5000, `SmartObjectInteractRange` 500.0, `InventorySharingAccess` `InventoryShareAccess.ON`, `bLastOpenCloseFinished` true |
+| `ue_describe_asset` `BP_Test` | OK | 0,90 s | classe `Blueprint`, `ParentClass` `Actor`, `warnings:[]` : `k2_get_asset_by_object_path(SoftObjectPath)` fonctionne sans repli |
+| Fin | OK | – | `ue_status` joignable ; `dirty_packages:[]` ; `Local/BP_Test.uasset` toujours 32 476 octets (`list_mod_files`, source mod) |
+
+### Étape 5 : modification de `BP_Test` par Robin
+Dans les Class Defaults de `BP_Test`, **Net Load on Client décoché** (propriété probablement `bNetLoadOnClient`),
+**sans enregistrer**. Résultats, relevés tels quels avec `ue_get_defaults` (`names:["bHidden"]`, un seul lot) :
+1. Avant : `dirty_packages:[]` (relevé à l'étape 4).
+2. « modifié » : `dirty_packages:["/Game/Mods/test/BP_Test"]` — la détection fonctionne dans le sens positif, rien d'autre.
+3. Annulation par **Ctrl+Z** : `dirty_packages:[]`. Aucun Reload nécessaire. (L'annulation retire donc bien
+   l'indicateur « modifié » du package ; ce n'est pas garanti pour toute modification.)
+
+### Notes de séance, telles quelles
+- **Relecture du lot 0 de l'étape 6.** Le premier passage du script de lots a envoyé le lot 0 (`start=0`), l'éditeur a
+  répondu, puis le script a échoué à lire la réponse (il a pris l'accolade de la ligne « noeud: … » de `ue_spike` pour
+  le début du JSON). La réponse étant perdue, le lot 0 a été **relu** avant de continuer. Ce n'est pas un nouvel essai
+  après un échec de l'éditeur : un défaut du script, corrigé (le JSON commence après la première ligne). Le lot 0 est
+  donc parti deux fois ; les deux lectures sont en lecture seule.
+- **Durée négative.** La mesure de l'étape 5 « annulé » a affiché −2,01 s : le pilote utilisait l'horloge murale
+  (`time.time()`), qui a sauté sous WSL (resynchronisation). La durée de cet appel n'est pas fiable (non reportée
+  dans le tableau). Correctif : `time.monotonic()` partout dans le pilote (`validation/mcp_seq.py`). Toutes les autres
+  durées ont été mesurées après le correctif, sauf les étapes 1 à 4 et l'étape 5 « modifié », mesurées avant : elles
+  sont positives et cohérentes (≈ 1 s par commande), sans saut constaté.
