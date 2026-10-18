@@ -3,14 +3,23 @@ name = "mcp-server"
 edition.workspace = true
 version.workspace = true
 
+[features]
+# Faux éditeur Unreal (ue_bridge::testing), réservé aux tests: absent du binaire livré.
+test-support = []
+
 [dependencies]
 anyhow = "1.0.104"
 conan-core = { version = "0.1.0", path = "../core" }
 rmcp = { version = "3.5.1", features = ["server", "macros", "transport-io"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "io-std", "io-util"] }
+socket2 = { version = "0.6.5", features = ["all"] }
+thiserror = "2.0.21"
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync"] }
+uuid = { version = "1.28.0", features = ["v4"] }
 
 [dev-dependencies]
+# Active test-support pour les tests d'intégration et les exemples, sans flag manuel.
+mcp-server = { path = ".", features = ["test-support"] }
 rmcp = { version = "3.5.1", features = ["client"] }
 tempfile = "3.27.0"
