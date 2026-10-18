@@ -422,6 +422,11 @@ pub(crate) mod tests {
 
     /// Interdits communs aux gabarits des outils et aux sondes (lecture seule stricte).
     pub(crate) fn assert_read_only(t: &Template) {
+        assert_read_only_except(t, &[]);
+    }
+
+    /// Même contrôle, en admettant explicitement certains motifs (la trace durable des sondes).
+    pub(crate) fn assert_read_only_except(t: &Template, allowed: &[&str]) {
         const FORBIDDEN: &[&str] = &[
             "save_",
             "delete_",
@@ -460,7 +465,7 @@ pub(crate) mod tests {
             "replace_variable",
         ];
         let src = t.source();
-        for bad in FORBIDDEN {
+        for bad in FORBIDDEN.iter().filter(|b| !allowed.contains(b)) {
             assert!(!src.contains(bad), "gabarit {}: contient {bad:?}", t.name);
         }
         // seuls `import json`, `import re`, `import sys`, `import unreal` sont admis (en tête de fichier)
@@ -475,7 +480,8 @@ pub(crate) mod tests {
                     "import time",
                     "import unreal"
                 ]
-                .contains(&line),
+                .contains(&line)
+                    || (line == "import os" && allowed.contains(&"os.")),
                 "{}: {line}",
                 t.name
             );
