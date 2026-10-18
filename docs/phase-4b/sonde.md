@@ -5,9 +5,8 @@ Sonde réalisée le 18 octobre sur le Devkit (UE 5.8.2, projet `ConanSandbox`, P
 absents du binaire livré). **Aucun enregistrement n'a été lancé.** Une seule compilation
 (`compile_blueprint` sur `BP_Test`), sans save.
 
-Artefacts conservés dans ce dossier (ne pas supprimer) :
-`members_BP_PL_Mailbox.json`, `members_BP_PL_Chest_Medium.json` (énumération seule),
-`inventaire_coffre_trace.json` (résultat de l'inventaire complet du coffre).
+Artefacts produits par la sonde (`members_BP_PL_Mailbox.json`, `members_BP_PL_Chest_Medium.json`,
+`inventaire_coffre_trace.json`) : non publiés dans cette copie, car ils décrivent des Blueprints du jeu.
 La trace `D:\ConanMod\probe_trace.log` (1770 lignes) a été supprimée avant que cette consigne n'existe :
 elle n'est pas conservée. Ses chiffres sont repris ci-dessous.
 
@@ -79,7 +78,7 @@ Noms UPROPERTY exacts acceptés par `get_editor_property` ; les noms affichés a
 
 - float contre double : `get_member_variable_type().export_text()` donne `PinCategory="real"` avec
   `PinSubCategory="float"` ou `"double"`. Python ne voit qu'un `float`.
-- Types vus dans l'inventaire : voir le champ `types_seen` de `inventaire_coffre_trace.json` (liste exacte).
+- Types vus dans l'inventaire : voir le champ `types_seen` de `inventaire_coffre_trace.json` (fichier non publié).
 - Composants propres du coffre relevés : `Lid_GEN_VARIABLE` et `BP_BAC_Storage_GEN_VARIABLE` (non comparés
   systématiquement à ceux de la boîte).
 - Composants hérités : `SubobjectDataSubsystem.k2_gather_subobject_data_for_blueprint` + 
