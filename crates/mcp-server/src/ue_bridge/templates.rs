@@ -438,7 +438,12 @@ def _components(blueprint, warnings):
 def _member_item(blueprint, cdo, qualified, plain, owner, expand):
     item = {"name": plain, "owner": owner}
     try:
-        item["type"] = _pin_type(blueprint.get_member_variable_type(qualified))["label"]
+        pin = _pin_type(blueprint.get_member_variable_type(qualified))
+        item["type"] = pin["label"]
+        item["pin_category"] = pin["category"]
+        # Python ne voit qu'un float: seule la broche distingue real(float) de real(double).
+        if pin["category"] == "real" and pin["container"] in ("None", "") and pin["sub_category"] in ("float", "double"):
+            item["precision"] = pin["sub_category"]
     except Exception as exc:
         item["type_error"] = type(exc).__name__
     try:
@@ -448,6 +453,11 @@ def _member_item(blueprint, cdo, qualified, plain, owner, expand):
         return item
     item["python_type"] = type(value).__name__
     item["value"] = _safe(value, plain in expand)
+    # Valeur brute d'un scalaire: repr() Python, donc exacte (0.3 en real(float) donne 0.30000001192092896).
+    if value is None or isinstance(value, (bool, int, float, str)):
+        raw = repr(value)
+        if len(raw) <= 200:
+            item["raw"] = raw
     return item
 
 
@@ -1006,12 +1016,26 @@ class SubobjectDataBlueprintFunctionLibrary:
     is_inherited_component = staticmethod(lambda d: d.inherited)
     is_native_component = staticmethod(lambda d: False)
     get_object_for_blueprint = staticmethod(lambda d, bp: d.obj)
+class _Real:
+    """Blueprint à variables scalaires: float contre double, nom avec espace, bool."""
+    TYPES = {
+        "Speed": '(PinCategory="real",PinSubCategory="double",PinSubCategoryObject=None,ContainerType=None)',
+        "Range": '(PinCategory="real",PinSubCategory="float",PinSubCategoryObject=None,ContainerType=None)',
+        "Name With Space": '(PinCategory="string",PinSubCategory="",PinSubCategoryObject=None,ContainerType=None)',
+        "Flag": '(PinCategory="bool",PinSubCategory="",PinSubCategoryObject=None,ContainerType=None)',
+    }
+    VALUES = {"Speed": 500.0, "Range": 0.30000001192092896, "Name With Space": "x", "Flag": True}
+    def generated_class(self): return "RealClass"
+    def list_member_variable_names(self): return list(self.TYPES)
+    def get_member_variable_type(self, n): return _Pin(self.TYPES[n])
 def load_asset(p):
+    if "BP_REAL" in p: return _Real()
     if "BP_MANY" in p: return _Big(130)
     if "BP_SLOW" in p: return _Big(10, 0.04)
     if "BP_BIG" in p: return _Big(2, 0.0, True)
     return _Bp() if "BP_" in p else None
 def get_default_object(c):
+    if c == "RealClass": return _Cdo(_Real.VALUES)
     if isinstance(c, _Cls): return _BigCdo(c)
     return _Cdo({"my_var": [3], "Item Data Table": "table"})
 for k, v in list(globals().items()):
@@ -1315,6 +1339,44 @@ sys.modules["unreal"] = unreal
         .unwrap();
         assert_eq!(r["next_index"], Value::Null);
         assert_eq!(items_of(&r).len(), 10);
+    }
+
+    #[test]
+    fn defaults_expose_float_versus_double_a_raw_value_and_exact_names_with_spaces() {
+        if python().is_none() {
+            eprintln!("SKIPPED defaults_float_double: python3 absent");
+            return;
+        }
+        let r = run_with_fake_unreal(&DEFAULTS, &json!({"object_path": "/Game/BP_REAL.BP_REAL"}))
+            .unwrap();
+        let by_name = |n: &str| -> Value {
+            items_of(&r)
+                .into_iter()
+                .find(|i| i["name"] == n)
+                .unwrap_or_else(|| panic!("{n} absent"))
+                .clone()
+        };
+        let (speed, range) = (by_name("Speed"), by_name("Range"));
+        assert_eq!(speed["type"], "real(double)");
+        assert_eq!(speed["precision"], "double");
+        assert_eq!(range["type"], "real(float)");
+        assert_eq!(range["precision"], "float");
+        assert_eq!(range["pin_category"], "real");
+        // valeur brute exacte: le piège « 0.3 devient 0.30000001192092896 »
+        assert_eq!(range["raw"], "0.30000001192092896");
+        assert_eq!(range["value"], json!(0.30000001192092896));
+        assert_eq!(speed["raw"], "500.0");
+        // nom avec espace: adressé tel quel, sans normalisation
+        let spaced = by_name("Name With Space");
+        assert_eq!(spaced["raw"], "'x'");
+        assert!(spaced.get("precision").is_none());
+        let only = run_with_fake_unreal(
+            &DEFAULTS,
+            &json!({"object_path": "/Game/BP_REAL.BP_REAL", "names": ["Name With Space", "name with space"]}),
+        )
+        .unwrap();
+        assert_eq!(items_of(&only).len(), 1);
+        assert_eq!(only["missing_names"], json!(["name with space"]));
     }
 
     #[test]

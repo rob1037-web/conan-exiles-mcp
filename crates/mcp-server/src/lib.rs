@@ -261,17 +261,22 @@ pub struct UeDefaultsParams {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct UeDiffParams {
-    /// Premier Blueprint (chemin d'objet).
+    /// Blueprint à lire (chemin d'objet). Dans le mode « valeurs proposées », c'est le Blueprint dont on
+    /// compare les valeurs actuelles aux valeurs de `proposed` (alias accepté: `asset_path`).
+    #[serde(alias = "asset_path")]
     pub object_path_a: String,
-    /// Second Blueprint (chemin d'objet).
-    pub object_path_b: String,
-    /// "members" (défaut), "components" ou "component_values" (voir ue_get_defaults).
+    /// Mode « deux Blueprints »: second Blueprint (chemin d'objet). Exclusif avec `proposed`.
+    pub object_path_b: Option<String>,
+    /// Mode « valeurs proposées » (dry-run, rien n'est écrit): `{nom exact de variable: valeur}`, 200 noms
+    /// au plus. Exclusif avec `object_path_b`; seule la section "members" est comparée.
+    pub proposed: Option<serde_json::Map<String, Value>>,
+    /// "members" (défaut), "components" ou "component_values" (voir ue_get_defaults). Mode deux Blueprints.
     pub section: Option<String>,
-    /// Composant à comparer pour section="component_values".
+    /// Composant à comparer pour section="component_values". Mode deux Blueprints.
     pub component: Option<String>,
-    /// Noms exacts des propriétés à comparer (200 au plus). Sans ce champ: tous les membres.
+    /// Noms exacts des propriétés à comparer (200 au plus). Sans ce champ: tous les membres. Mode deux Blueprints.
     pub names: Option<Vec<String>>,
-    /// Noms exacts des propriétés à déplier des deux côtés (20 au plus).
+    /// Noms exacts des propriétés à déplier des deux côtés (20 au plus). Mode deux Blueprints.
     pub expand: Option<Vec<String>>,
 }
 
@@ -590,6 +595,60 @@ impl ConanServer {
                 });
             }
         }
+    }
+
+    /// Mode « valeurs proposées » de ue_diff_defaults: lit seulement les variables nommées dans `proposed`
+    /// (section members) et classe chaque valeur proposée. Ne modifie rien.
+    async fn ue_diff_proposed(
+        &self,
+        p: &UeDiffParams,
+        proposed: &serde_json::Map<String, Value>,
+    ) -> Result<CallToolResult, String> {
+        if proposed.is_empty() {
+            return Err(
+                "ERREUR InvalidParameter: `proposed` est vide; attendu {nom exact: valeur}.".into(),
+            );
+        }
+        if p.section.as_deref().is_some_and(|s| s.trim() != "members")
+            || p.component.is_some()
+            || p.names.is_some()
+            || p.expand.is_some()
+        {
+            return Err(
+                "ERREUR InvalidParameter: avec `proposed`, seules les variables membres sont \
+                        comparées; `section`, `component`, `names` et `expand` ne s'appliquent pas \
+                        (les noms sont les clés de `proposed`)."
+                    .into(),
+            );
+        }
+        if let Some((name, _)) = proposed
+            .iter()
+            .find(|(_, v)| v.to_string().chars().count() > UE_MAX_TEXT * 4)
+        {
+            return Err(format!(
+                "ERREUR InvalidParameter: la valeur proposée pour {name:?} est trop longue."
+            ));
+        }
+        let names: Vec<String> = proposed.keys().cloned().collect();
+        let base = ue_defaults_base(&p.object_path_a, &None, &None, &Some(names), &None)?;
+        let f = self.ue_fetch_defaults(&base, 0).await?;
+        if f.next_index.is_some() {
+            return Err(format!(
+                "ERREUR TooLarge: lecture incomplète après {UE_MAX_COMMANDS} commandes; réduire `proposed`."
+            ));
+        }
+        let missing: Vec<String> = f.meta["missing_names"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        let mut result = ue_defaults::diff_proposed(&f.items, &missing, proposed);
+        result["object_path"] = base["object_path"].clone();
+        result["commands"] = json!(f.commands);
+        result["dirty_packages"] = f.meta["dirty_packages"].clone();
+        result["warnings"] = json!(f.warnings);
+        Ok(CallToolResult::structured(without_nulls(result)))
     }
 
     /// Le magasin de schémas, ou une erreur d'outil explicite s'il est indisponible.
@@ -1339,17 +1398,44 @@ impl ConanServer {
     }
 
     #[tool(
-        description = "LECTURE SEULE. Compare les valeurs par défaut de DEUX Blueprints du Devkit (mêmes \
-                       sections que ue_get_defaults). Renvoie les différences (valeur A, valeur B, type), \
-                       les propriétés présentes d'un seul côté et celles NON comparées (illisibles ou \
-                       conteneurs/structs non dépliés: `expand`). Flottants égaux à 1e-6 près, entiers \
-                       exacts. Même lecture bornée que ue_get_defaults; si un Blueprint dépasse 12 commandes, \
-                       erreur: restreindre avec `names`. Nécessite le Devkit ouvert."
+        description = "LECTURE SEULE (rien n'est écrit). Deux modes. (1) `object_path_b`: compare les valeurs \
+                       par défaut de DEUX Blueprints (mêmes sections que ue_get_defaults); renvoie les \
+                       différences (valeur A, valeur B, type), les propriétés présentes d'un seul côté et celles \
+                       NON comparées (illisibles ou conteneurs/structs non dépliés: `expand`); flottants \
+                       comparés exactement quand la précision est connue (real(float) ou real(double)), \
+                       sinon à 1e-6 près; entiers exacts; si un Blueprint dépasse 12 commandes, erreur: restreindre \
+                       avec `names`. (2) `proposed` = {nom exact: valeur}: compare des valeurs PROPOSÉES aux \
+                       valeurs actuelles de `object_path_a` (dry-run d'une future écriture). Statut par \
+                       variable: unchanged, modified, type_mismatch, unknown_variable (nom inconnu, casse et \
+                       espaces comptent), not_comparable (illisible, conteneur, struct); `valid` est vrai si \
+                       tout est comparable et de bon type. real(float): la valeur proposée est arrondie en \
+                       float 32 bits (`proposed_stored`), avec `not_representable`+`warning` si l'arrondi \
+                       change les chiffres saisis (16777217 → 16777216); real(double): comparaison exacte. Exactement un des deux paramètres. Nécessite le \
+                       Devkit ouvert."
     )]
     async fn ue_diff_defaults(
         &self,
         Parameters(p): Parameters<UeDiffParams>,
     ) -> Result<CallToolResult, String> {
+        match (&p.object_path_b, &p.proposed) {
+            (Some(_), Some(_)) => {
+                return Err(
+                    "ERREUR InvalidParameter: `object_path_b` et `proposed` sont exclusifs; \
+                            fournir l'un ou l'autre."
+                        .into(),
+                )
+            }
+            (None, None) => {
+                return Err(
+                    "ERREUR InvalidParameter: fournir `object_path_b` (comparer deux Blueprints) \
+                            ou `proposed` (comparer des valeurs proposées)."
+                        .into(),
+                )
+            }
+            (None, Some(proposed)) => return self.ue_diff_proposed(&p, proposed).await,
+            (Some(_), None) => {}
+        }
+        let object_path_b = p.object_path_b.clone().unwrap_or_default();
         let base_a = ue_defaults_base(
             &p.object_path_a,
             &p.section,
@@ -1358,7 +1444,7 @@ impl ConanServer {
             &p.expand,
         )?;
         let base_b = ue_defaults_base(
-            &p.object_path_b,
+            &object_path_b,
             &p.section,
             &p.component,
             &p.names,

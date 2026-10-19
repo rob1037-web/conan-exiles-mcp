@@ -710,6 +710,185 @@ async fn ue_diff_defaults_refuses_a_blueprint_too_large_to_read_in_one_call() {
     );
 }
 
+/// Faux éditeur pour le mode « valeurs proposées »: sert des variables typées et note les paramètres reçus.
+fn proposed_node(seen: Arc<Mutex<Vec<Value>>>) -> FakeNode {
+    FakeNode::start(Behavior::default(), move |command| {
+        let p = params_of(command);
+        seen.lock().unwrap().push(p.clone());
+        let asked: Vec<String> = p["names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_str().unwrap().to_owned())
+            .collect();
+        let known = json!([
+            {"name": "Range", "owner": "", "type": "real(float)", "pin_category": "real", "precision": "float",
+             "python_type": "float", "value": 0.30000001192092896, "raw": "0.30000001192092896"},
+            {"name": "Count", "owner": "", "type": "int", "pin_category": "int", "python_type": "int", "value": 3, "raw": "3"},
+            {"name": "Item Data Table", "owner": "", "type": "object<DataTable>", "pin_category": "object",
+             "python_type": "DataTable", "value": "/Game/DT_A.DT_A"},
+            {"name": "Tags", "owner": "", "type": "Array of name", "pin_category": "name", "python_type": "Array",
+             "value": {"not_expanded": true, "kind": "Array", "length": 2}},
+        ]);
+        let items: Vec<Value> = known
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| asked.iter().any(|n| i["name"] == *n))
+            .cloned()
+            .collect();
+        let missing: Vec<&String> = asked
+            .iter()
+            .filter(|n| !items.iter().any(|i| i["name"] == **n))
+            .collect();
+        let payload = json!({
+            "object_path": p["object_path"], "section": "members", "total": items.len(), "start": 0,
+            "next_index": null, "budget_exceeded": false, "missing_names": missing, "items": items,
+            "dirty_packages": [], "warnings": [], "elapsed_s": 0.01,
+        });
+        Reply::printing(&format!("{MARKER_BEGIN}{payload}{MARKER_END}"))
+    })
+}
+
+#[tokio::test]
+async fn ue_diff_defaults_with_proposed_values_is_a_read_only_dry_run() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let node = proposed_node(seen.clone());
+    let (_env, s) = session(&node).await;
+    let r = s
+        .call(
+            "ue_diff_defaults",
+            json!({"asset_path": "/Game/BP_A", "proposed": {
+                "Range": 0.3, "Count": 4, "Item Data Table": "/Game/DT_A.DT_A",
+                "Tags": ["a"], "Nope": 1, "Count2": 1
+            }}),
+        )
+        .await;
+    assert!(!is_error(&r), "{}", text(&r));
+    assert_json_text(&r);
+    let v = structured(&r);
+    let status = |n: &str| {
+        v["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == n)
+            .unwrap_or_else(|| panic!("{n} absent: {v}"))["status"]
+            .clone()
+    };
+    assert_eq!(status("Range"), "unchanged"); // 0.3 contre le flottant 32 bits lu
+    assert_eq!(status("Count"), "modified");
+    assert_eq!(status("Item Data Table"), "unchanged");
+    assert_eq!(status("Tags"), "not_comparable");
+    assert_eq!(status("Nope"), "unknown_variable");
+    assert_eq!(v["valid"], false);
+    assert_eq!(v["would_change"], true);
+    assert_eq!(v["read_only"], true);
+    assert_eq!(v["object_path"], "/Game/BP_A.BP_A");
+    // le script n'a lu que les variables nommées, en section members, par nom exact
+    let received = seen.lock().unwrap();
+    assert_eq!(received[0]["section"], "members");
+    let mut names: Vec<String> = received[0]["names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap().to_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "Count",
+            "Count2",
+            "Item Data Table",
+            "Nope",
+            "Range",
+            "Tags"
+        ]
+    );
+    assert_eq!(v["dirty_packages"], json!([]));
+}
+
+#[tokio::test]
+async fn ue_diff_defaults_with_a_valid_proposal_reports_valid_true() {
+    let node = proposed_node(Arc::new(Mutex::new(Vec::new())));
+    let (_env, s) = session(&node).await;
+    let r = s
+        .call(
+            "ue_diff_defaults",
+            json!({"object_path_a": "/Game/BP_A", "proposed": {"Count": 9, "Range": 0.3}}),
+        )
+        .await;
+    let v = structured(&r);
+    assert_eq!(
+        (
+            v["valid"].clone(),
+            v["modified"].clone(),
+            v["unchanged"].clone()
+        ),
+        (json!(true), json!(1), json!(1))
+    );
+    // real(float): arrondi en f32 puis comparaison exacte (0.3000001 n'est plus « inchangé »)
+    let fine = s
+        .call(
+            "ue_diff_defaults",
+            json!({"object_path_a": "/Game/BP_A", "proposed": {"Range": 0.3000001}}),
+        )
+        .await;
+    let f = structured(&fine);
+    assert_eq!(f["changes"][0]["status"], "modified");
+    assert_eq!(f["changes"][0]["precision"], "float");
+    assert!(f["changes"][0]["proposed_stored"].is_number());
+    assert!(f["changes"][0].get("warning").is_none());
+    // 16777217 n'existe pas en float 32 bits: avertissement, valeur stockée 16777216
+    let lossy = s
+        .call(
+            "ue_diff_defaults",
+            json!({"object_path_a": "/Game/BP_A", "proposed": {"Range": 16777217}}),
+        )
+        .await;
+    let l = structured(&lossy);
+    assert_eq!(l["changes"][0]["not_representable"], true);
+    assert_eq!(l["changes"][0]["shortest_stored"], "16777216");
+    assert_eq!(l["not_representable"], 1);
+    let bad = s
+        .call(
+            "ue_diff_defaults",
+            json!({"object_path_a": "/Game/BP_A", "proposed": {"Count": "trois"}}),
+        )
+        .await;
+    let b = structured(&bad);
+    assert_eq!(b["changes"][0]["status"], "type_mismatch");
+    assert_eq!(b["valid"], false);
+}
+
+#[tokio::test]
+async fn ue_diff_defaults_validates_its_two_modes_before_touching_the_editor() {
+    let node = node_replying(json!({}));
+    let (_env, s) = session(&node).await;
+    let cases = [
+        json!({"object_path_a": "/Game/BP_A"}),
+        json!({"object_path_a": "/Game/BP_A", "object_path_b": "/Game/BP_B", "proposed": {"X": 1}}),
+        json!({"object_path_a": "/Game/BP_A", "proposed": {}}),
+        json!({"object_path_a": "/Game/BP_A", "proposed": {"X": 1}, "section": "components"}),
+        json!({"object_path_a": "/Game/BP_A", "proposed": {"X": 1}, "names": ["X"]}),
+        json!({"object_path_a": "/Game/BP_A", "proposed": {"": 1}}),
+    ];
+    for args in cases {
+        let r = s.call("ue_diff_defaults", args.clone()).await;
+        assert!(
+            is_error(&r) && text(&r).starts_with("ERREUR InvalidParameter:"),
+            "{args}: {}",
+            text(&r)
+        );
+    }
+    assert_eq!(
+        node.opens.load(Ordering::SeqCst),
+        0,
+        "aucune session ouverte"
+    );
+}
+
 // ---- Garde-fou EditorBusy ----
 
 fn short_timeout(node: &FakeNode) -> mcp_server::ue_bridge::BridgeConfig {

@@ -39,6 +39,12 @@ Décisions :
 ### Migration des schémas (faite)
 `schemas/lightning_rod_loot.toml` et `schemas/exemple.toml` ont reçu `key_column = "---"` : un seul format, une seule règle (`SchemaError::MissingKeyColumn` si absent). Tous les schémas versionnés se chargent dans un `SCHEMA_ROOT` (test).
 
+### Phase 4b : valeurs par défaut des Blueprints (lecture seule)
+`ue_get_defaults` et `ue_diff_defaults` ne modifient rien dans le Devkit (gabarits Python figés, test statique). `ue_diff_defaults` a deux modes exclusifs : deux Blueprints (`object_path_b`) ou des valeurs proposées (`proposed`, dry-run de la future écriture 4c).
+- **Précision des flottants** : Python ne voit qu'un `float`; `real(float)` ou `real(double)` vient de la broche du Blueprint (champ `precision`). `real(float)` : la valeur proposée est arrondie en **f32** (`proposed_stored`) puis comparée exactement; si l'arrondi change les chiffres saisis, `not_representable: true` + `warning` (`16777217` → `16777216`; `0.3` sans alerte; informatif, `valid` n'en tient pas compte). `real(double)` : comparaison **exacte**. Précision inconnue (composants) : tolérance 1e-6.
+- `raw` = `repr` Python d'un scalaire, **pas** un `export_text()` (en 4a, `export_text()` n'a été appelé que sur le type de la variable, jamais sur une valeur). Ne pas s'en servir pour écrire.
+- Noms de variables : adressage par nom exact, casse et espaces compris, aucune normalisation.
+
 ### Format du fichier écrit
 `write_datatable` remet toujours le contenu reçu au **format des exports du Devkit** avant comparaison et écriture (`Table::to_devkit_format`) : en-tête et clés sans guillemets, valeurs entre guillemets, flottants à six décimales (jamais d'arrondi), LF, sans BOM, retour final. Le diff compare les **valeurs après parsing CSV**, pas le texte brut : les guillemets ne sont jamais une modification (signalés à part, `quoting_changed`).
 
@@ -93,7 +99,9 @@ fixtures/      # exports réels du Devkit pour les tests
 
 ### Phase 3 — Boucle réelle
 - [x] Phase 3a : `SCHEMA_ROOT` optionnel, outils `list_schemas`, `describe_schema`, `validate_rows`, validation par schéma obligatoire dans `write_datatable` (table de test `DT_Purge_Nordheimer`)
-- [x] Phase 3b (branche `phase-3b`, en attente de recette) : outils `add_row`, `update_row`, `delete_row`
+- [x] Phase 3b (close, recette validée dans Claude Desktop et le Devkit) : outils `add_row`, `update_row`, `delete_row`
+- [x] Phase 4a (close, fusionnée dans `main`) : pont en lecture seule `ue_status`, `ue_search_assets`, `ue_describe_asset`, `ue_blueprint_variables`
+- [ ] Phase 4b (branche `phase-4b-ue-defaults`) : `ue_get_defaults`, `ue_diff_defaults` (deux Blueprints ou valeurs proposées) — code et tests faits, recette Devkit à faire (`docs/phase-4b-test.md`)
 - [ ] Générer 20 lignes via Claude, réimporter dans le Devkit, vérifier en jeu
 - [ ] Chaque casse à l'import → nouveau test
 - [ ] Exporter une DataTable contenant du texte (virgules, guillemets, accents) pour valider les cas limites du CSV (tests actuellement marqués « non validé sur un export Devkit réel »)

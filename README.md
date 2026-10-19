@@ -69,7 +69,18 @@ Les erreurs sont renvoyées sous la forme `ERREUR <code>: <message>`, lisibles p
 | `ue_describe_asset` | Décrit un asset. |
 | `ue_blueprint_variables` | Liste les variables d'un Blueprint. |
 | `ue_get_defaults` | Lit les valeurs par défaut d'un Blueprint. |
-| `ue_diff_defaults` | Compare les valeurs par défaut de deux Blueprints. |
+| `ue_diff_defaults` | Compare les valeurs par défaut de deux Blueprints, ou des valeurs **proposées** aux valeurs actuelles d'un Blueprint (dry-run, rien n'est écrit). |
+
+**Comparaison des flottants.** Python ne voit qu'un `float` : la distinction `real(float)` /
+`real(double)` vient du type de la broche du Blueprint (champ `precision`).
+
+- `real(float)` : la valeur proposée est **arrondie en float 32 bits** (`proposed_stored`) puis comparée
+  exactement. `0.3` est « inchangé » face à `0.30000001192092896`. Si l'arrondi change les chiffres
+  saisis (`16777217` devient `16777216`), la réponse porte `not_representable: true`, `shortest_stored`
+  et un `warning`. C'est une information : `valid` n'en tient pas compte. Hors plage 32 bits : `type_mismatch`.
+- `real(double)` : comparaison exacte, sans tolérance.
+- Précision inconnue (valeurs de composants, type inattendu) : tolérance absolue de 1e-6.
+- `raw` est le `repr` Python de la valeur, pas un `export_text()` d'Unreal.
 
 Ces outils ne **modifient, n'enregistrent et ne compilent rien**. Voir
 [docs/ue-remote-execution.md](docs/ue-remote-execution.md) et [docs/phase-4b/](docs/phase-4b/).
@@ -158,10 +169,11 @@ docs/          mode d'emploi, intégration Claude Desktop, notes du pont Unreal
 | 1 | Noyau sans MCP : schémas, validation, CSV exact à l'octet, sandbox | Terminé |
 | 2 | Serveur MCP stdio, dry-run + diff, sauvegarde, écriture atomique | Terminé |
 | 3a | Schémas obligatoires, `list_schemas`, `describe_schema`, `validate_rows` | Terminé |
-| 3b | Opérations par ligne : `add_row`, `update_row`, `delete_row` | Terminé, en attente de recette |
+| 3b | Opérations par ligne : `add_row`, `update_row`, `delete_row` | Close (recette validée dans Claude Desktop et le Devkit) |
 | 3 (suite) | Génération de 20 lignes en conditions réelles, réimport dans le Devkit, cas limites du CSV (virgules, guillemets, accents) sur un export réel | **En cours** |
-| 4a | Pont de lecture vers l'éditeur Unreal (*Python Remote Execution*) | **En cours** |
-| 4b | Lecture des valeurs par défaut des Blueprints (`ue_get_defaults`, `ue_diff_defaults`) | **En cours** |
+| 4a | Pont de lecture vers l'éditeur Unreal (*Python Remote Execution*) : `ue_status`, `ue_search_assets`, `ue_describe_asset`, `ue_blueprint_variables` | Close (fusionnée dans `main`) |
+| 4b | Lecture des valeurs par défaut des Blueprints (`ue_get_defaults`, `ue_diff_defaults`), prérequis de toute écriture | **En cours** : code et tests faits, recette dans le Devkit à faire ([procédure](docs/phase-4b-test.md)) |
+| 4c | Écriture des valeurs par défaut dans le Devkit (dry-run issu de `ue_diff_defaults`) | Prévu |
 | 4 (suite) | Autres formats de configuration texte du mod | Prévu |
 | 4 (suite) | Outil `create_schema_from_fixture` (déduire un schéma d'un export) | Prévu |
 | 4 (suite) | Contraintes entre colonnes (ex. `MinAmount` ≤ `MaxAmount`) | Prévu |
@@ -169,14 +181,14 @@ docs/          mode d'emploi, intégration Claude Desktop, notes du pont Unreal
 | 4 (suite) | Réimport automatique dans le Devkit, si les commandlets le permettent | À l'étude |
 
 Hors périmètre actuel : format JSON des DataTables, écriture par lots, renommage de clé, réparation
-automatique de CSV, génération automatique de schémas.
+automatique de CSV.
 
 ## Versions
 
 Le projet suit le [versionnement sémantique](https://semver.org/lang/fr/). Tant que la version
 majeure est `0`, l'interface des outils peut encore changer.
 
-- **0.1.0** — première version publique : outils CSV complets (lecture, validation, écriture, opérations par ligne) et premiers outils de lecture du pont Unreal, tous deux encore en cours de stabilisation.
+- **0.1.0** — première version publique : outils CSV complets (lecture, validation, écriture, opérations par ligne) et outils de lecture du pont Unreal (15 outils MCP), encore en cours de stabilisation.
 
 ## Limites connues
 
