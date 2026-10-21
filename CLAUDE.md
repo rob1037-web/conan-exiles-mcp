@@ -46,7 +46,7 @@ Décisions :
 - Noms de variables : adressage par nom exact, casse et espaces compris, aucune normalisation.
 
 ### Format du fichier écrit
-`write_datatable` remet toujours le contenu reçu au **format des exports du Devkit** avant comparaison et écriture (`Table::to_devkit_format`) : en-tête et clés sans guillemets, valeurs entre guillemets, flottants à six décimales (jamais d'arrondi), LF, sans BOM, retour final. Le diff compare les **valeurs après parsing CSV**, pas le texte brut : les guillemets ne sont jamais une modification (signalés à part, `quoting_changed`).
+`write_datatable` remet toujours le contenu reçu au **format des exports du Devkit** avant comparaison et écriture (`Table::to_devkit_format`) : en-tête et clés sans guillemets, valeurs entre guillemets, flottants à six décimales (jamais d'arrondi), retour final. **Encodage, BOM et fins de ligne** : ceux du fichier existant s'il existe (le Devkit exporte en UTF-16 LE avec BOM dès qu'un texte n'est pas ASCII; détection par le BOM `FF FE` / `EF BB BF`, sinon UTF-8 strict; réécriture à l'octet près), sinon, pour un nouveau fichier, UTF-8 sans BOM et LF. `read_datatable` et les rapports de dry-run indiquent l'encodage; UTF-16 BE n'est pas pris en charge. Le diff compare les **valeurs après parsing CSV**, pas le texte brut : les guillemets ne sont jamais une modification (signalés à part, `quoting_changed`).
 
 ### Vérification dans le Devkit
 Importer le CSV comme **nouvelle DataTable dans le dossier du mod**, row struct de la table, options d'import décochées, puis supprimer l'asset. Ne jamais réimporter une table de base du jeu (assets verrouillés). Voir `docs/MODE_EMPLOI.md`.

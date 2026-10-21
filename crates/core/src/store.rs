@@ -18,7 +18,7 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::Config;
-use crate::csv::{validate_table, CsvError, Table};
+use crate::csv::{validate_table, CsvError, Encoding, Newline, Table};
 use crate::diff::TableDiff;
 use crate::listing::{list_files, ListError, Listing};
 use crate::sandbox::{check_relative, Sandbox, SandboxError};
@@ -327,7 +327,8 @@ impl CsvStore {
     ///   sinon mêmes règles que `write_csv` (confirm, sauvegarde, écriture atomique).
     ///
     /// Le contenu est remis au format des exports du Devkit avant comparaison et écriture
-    /// (`Table::to_devkit_format`). Aucun mode « forcer ».
+    /// (`Table::to_devkit_format`), hors encodage et fins de ligne d'un fichier existant, conservés.
+    /// Aucun mode « forcer ».
     pub fn write_with_schema(
         &self,
         schema: &Schema,
@@ -343,9 +344,16 @@ impl CsvStore {
                 errors: report,
             });
         }
-        // Le fichier écrit (et comparé à l'existant) est toujours au format du Devkit, quel que
-        // soit le format reçu: le diff ne montre alors que les vrais changements de valeur.
-        let canonical = table.to_devkit_format(schema).to_bytes();
+        // Le fichier écrit (et comparé à l'existant) est toujours au format du Devkit (guillemets,
+        // décimales), quel que soit le format reçu: le diff ne montre alors que les vrais
+        // changements de valeur. L'encodage (BOM compris) et les fins de ligne d'un fichier
+        // existant sont conservés tels quels; un nouveau fichier est en UTF-8 sans BOM, LF.
+        let mut devkit = table.to_devkit_format(schema);
+        if let Some((encoding, newline)) = self.existing_format(rel) {
+            devkit.encoding = encoding;
+            devkit.newline = newline;
+        }
+        let canonical = devkit.to_bytes();
         let normalized = canonical != bytes;
         let outcome = self.write_csv(rel, &canonical, options)?;
         Ok(SchemaWrite {
@@ -353,6 +361,20 @@ impl CsvStore {
             normalized,
             report,
         })
+    }
+
+    /// Encodage et fins de ligne du fichier `rel` s'il existe et se lit. Silencieux dans tous les
+    /// autres cas (chemin refusé, fichier absent ou illisible): `write_csv` produit alors, comme
+    /// avant, l'erreur qui convient.
+    fn existing_format(&self, rel: &str) -> Option<(Encoding, Newline)> {
+        let comps = check_relative(rel).ok()?;
+        if comps[0].eq_ignore_ascii_case(BACKUP_DIR) {
+            return None;
+        }
+        let target = self.csv.resolve_write(rel).ok()?;
+        self.guard_write(&target).ok()?;
+        let table = Table::parse(&std::fs::read(&target).ok()?).ok()?;
+        Some((table.encoding, table.newline))
     }
 
     /// Écrit un CSV sous `CSV_ROOT` (dossiers intermédiaires créés au besoin, sauf en
@@ -419,6 +441,8 @@ impl CsvStore {
             applied: false,
             unchanged: existing.as_deref() == Some(bytes),
             backup: None,
+            encoding: new_table.encoding,
+            newline: new_table.newline,
             diff: TableDiff::between(old_table.as_ref(), &new_table),
         };
         if options.dry_run || outcome.unchanged {
@@ -476,6 +500,10 @@ pub struct WriteOutcome {
     pub unchanged: bool,
     /// Sauvegarde créée avant le remplacement.
     pub backup: Option<PathBuf>,
+    /// Encodage (BOM compris) du fichier tel qu'il est écrit, ou qu'il le serait en dry-run.
+    pub encoding: Encoding,
+    /// Fins de ligne du fichier tel qu'il est écrit, ou qu'il le serait en dry-run.
+    pub newline: Newline,
     pub diff: TableDiff,
 }
 

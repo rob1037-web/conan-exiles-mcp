@@ -749,6 +749,16 @@ impl ConanServer {
             report.push_str(&format!("Opération: {op}\n"));
         }
         report.push_str(&format!(
+            "Encodage: {}, fins de ligne {} ({})\n",
+            outcome.encoding.label(),
+            newline_name(outcome.newline),
+            if outcome.existed {
+                "conservés du fichier existant"
+            } else {
+                "nouveau fichier: format par défaut du Devkit"
+            }
+        ));
+        report.push_str(&format!(
             "Table: {} — fichier: {} ({})\nChemin réel: {}\n{}",
             schema.name,
             path,
@@ -777,7 +787,8 @@ impl ConanServer {
         if normalized {
             report.push_str(
                 "Format: le contenu reçu a été remis au format du Devkit (en-tête et clés sans guillemets, \
-                 valeurs entre guillemets, flottants à six décimales, LF) avant comparaison et écriture; \
+                 valeurs entre guillemets, flottants à six décimales; encodage, BOM et fins de ligne du \
+                 fichier existant conservés, sinon UTF-8 sans BOM et LF) avant comparaison et écriture; \
                  le diff ne montre que les changements de valeur.\n",
             );
         }
@@ -957,7 +968,9 @@ impl ConanServer {
                 "returned": rows.len(),
                 "truncated": offset + rows.len() < table.rows.len(),
                 "format": {
-                    "bom": table.bom,
+                    "encoding": table.encoding.id(),
+                    "encoding_label": table.encoding.label(),
+                    "bom": table.encoding.has_bom(),
                     "newline": newline_name(table.newline),
                     "final_newline": table.final_newline,
                 },
@@ -1491,6 +1504,9 @@ fn structured_write(
 ) -> Value {
     json!({
         "path": path,
+        "encoding": outcome.encoding.id(),
+        "encoding_label": outcome.encoding.label(),
+        "newline": newline_name(outcome.newline),
         "real_path": pretty(&outcome.path),
         "existed": outcome.existed,
         "applied": outcome.applied,

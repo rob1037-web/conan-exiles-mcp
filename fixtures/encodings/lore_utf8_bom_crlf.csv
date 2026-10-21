@@ -1,0 +1,4 @@
+﻿---,Name,Text,Category
+Lore_001,"NSLOCTEXT("""", ""Lore_001_Name"", ""Épée, longue"")","NSLOCTEXT("""", ""Lore_001_Text"", ""Il dit ""non"", puis part."")","Récit"
+Lore_002,"NSLOCTEXT("""", ""Lore_002_Name"", ""Bouclier"")","NSLOCTEXT("""", ""Lore_002_Text"", ""Forgé à Æsgard: « gloire, honneur »."")","Légende"
+Lore_003,"NSLOCTEXT("""", ""Lore_003_Name"", ""Hache"")","NSLOCTEXT("""", ""Lore_003_Text"", ""Trois mots, deux virgules, et ""des guillemets""."")","Récit"

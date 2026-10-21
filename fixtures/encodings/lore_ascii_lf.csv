@@ -1,0 +1,3 @@
+---,Name,Text,Category
+Lore_001,"NSLOCTEXT("""", ""Lore_001_Name"", ""Long sword, heavy"")","NSLOCTEXT("""", ""Lore_001_Text"", ""He says ""no"", then leaves."")","Story"
+Lore_002,"NSLOCTEXT("""", ""Lore_002_Name"", ""Shield"")","NSLOCTEXT("""", ""Lore_002_Text"", ""Forged in Asgard: glory, honor."")","Legend"

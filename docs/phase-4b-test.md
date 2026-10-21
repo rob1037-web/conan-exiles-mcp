@@ -199,8 +199,8 @@ les outils `ue_*` ; le Devkit sert à exporter puis à réimporter.
 
 Dans Claude Desktop : « Lis la table `<table>` avec `read_datatable` ». Attendu : l'en-tête et **toutes**
 les lignes, avec les virgules, guillemets et accents **intacts** dans les valeurs (pas de colonne
-décalée, pas de `Ã©` ou de `?` à la place des accents). Noter le format détecté (fins de ligne,
-guillemets, BOM). Puis `validate_rows` sans lignes sur la table : `Validation: OK` (sinon, noter
+décalée, pas de `Ã©` ou de `?` à la place des accents). Noter le format détecté (`format.encoding` :
+`utf-16le-bom` attendu pour un export contenant des accents ; fins de ligne, BOM). Puis `validate_rows` sans lignes sur la table : `Validation: OK` (sinon, noter
 l'erreur : c'est peut-être un cas limite à corriger dans le parseur ou dans le schéma).
 
 ### 7.3 Réécriture à l'identique et comparaison octet à octet

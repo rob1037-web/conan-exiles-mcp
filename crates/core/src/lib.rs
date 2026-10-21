@@ -14,7 +14,7 @@ pub mod validate;
 pub mod value;
 
 pub use config::{Config, ConfigError, DEFAULT_CSV_ROOT};
-pub use csv::{validate_table, CsvCell, CsvError, CsvRecord, Newline, Table, WriteError};
+pub use csv::{validate_table, CsvCell, CsvError, CsvRecord, Encoding, Newline, Table, WriteError};
 pub use diff::{ColumnChange, DiffRow, ModifiedRow, TableDiff};
 pub use listing::{FileEntry, ListError, Listing, MAX_LIST_ENTRIES};
 pub use rowops::{RowOp, RowOutcome};

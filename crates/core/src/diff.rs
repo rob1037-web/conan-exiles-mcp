@@ -6,7 +6,7 @@
 //!
 //! Le diff compare les **valeurs après parsing CSV** (le texte des cellules), pas le texte brut :
 //! la présence ou l'absence de guillemets n'est jamais un changement de valeur (signalée à part
-//! par `quoting_changed`). Le format du fichier (BOM, fins de ligne, retour final) est signalé
+//! par `quoting_changed`). Le format du fichier (encodage et BOM, fins de ligne, retour final) est signalé
 //! par `format_changed`.
 
 use std::collections::HashMap;
@@ -41,7 +41,7 @@ pub struct TableDiff {
     pub header_changed: bool,
     /// Des cellules ont la même valeur mais pas les mêmes guillemets (aucun changement de valeur).
     pub quoting_changed: bool,
-    /// BOM, type de fin de ligne ou retour final différent.
+    /// Encodage (BOM compris), type de fin de ligne ou retour final différent.
     pub format_changed: bool,
     /// Les lignes sont dans un autre ordre (sans que cela change leur contenu).
     pub order_changed: bool,
@@ -62,7 +62,7 @@ impl TableDiff {
         let mut diff = TableDiff {
             header_changed: !same_texts(&old.header.cells, &new.header.cells),
             quoting_changed: quoting_differs(old, new),
-            format_changed: old.bom != new.bom
+            format_changed: old.encoding != new.encoding
                 || old.newline != new.newline
                 || old.final_newline != new.final_newline,
             order_changed: common_order_differs(old, new),

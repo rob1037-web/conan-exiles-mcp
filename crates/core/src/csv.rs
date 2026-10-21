@@ -4,7 +4,12 @@
 //! faut pour réécrire le fichier à l'octet près (BOM, type de fin de ligne, retour
 //! final, quoting de chaque cellule), au lieu de le deviner à l'écriture.
 //!
-//! Format accepté : UTF-8, séparateur `,`, cellules quotées (`"..."`, guillemet
+//! Encodage détecté par le BOM : `FF FE` = UTF-16 LE (export Devkit dès qu'un texte n'est pas ASCII),
+//! `EF BB BF` = UTF-8 avec BOM, sinon UTF-8 strict (les exports ASCII). Le BOM est retiré avant le
+//! parsing et l'encodage est conservé dans `Table::encoding` pour la réécriture. UTF-16 BE n'est pas
+//! pris en charge (erreur explicite).
+//!
+//! Format accepté : texte décodé, séparateur `,`, cellules quotées (`"..."`, guillemet
 //! échappé par `""`, virgules et sauts de ligne admis entre guillemets) ou non quotées
 //! (sans `"` ni saut de ligne). Fins de ligne `\n` ou `\r\n`, jamais mélangées.
 //! Tout le reste est une erreur, jamais une correction silencieuse.
@@ -13,12 +18,58 @@ use crate::schema::Schema;
 use crate::validate::{validate_row, Rule, ValidationError};
 use crate::value::{RawRow, Row};
 
-const BOM: char = '\u{feff}';
+const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+const UTF16_LE_BOM: [u8; 2] = [0xFF, 0xFE];
+const UTF16_BE_BOM: [u8; 2] = [0xFE, 0xFF];
+
+/// Encodage d'un fichier CSV, avec son BOM. Détecté à la lecture, restitué tel quel à la réécriture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encoding {
+    /// UTF-8 sans BOM (les exports ASCII du Devkit en font partie).
+    Utf8,
+    /// UTF-8 avec BOM (`EF BB BF`).
+    Utf8Bom,
+    /// UTF-16 petit-boutiste avec BOM (`FF FE`), l'export du Devkit dès qu'un texte n'est pas ASCII.
+    Utf16LeBom,
+}
+
+impl Encoding {
+    /// Identifiant stable, pour les réponses des outils.
+    pub fn id(self) -> &'static str {
+        match self {
+            Encoding::Utf8 => "utf-8",
+            Encoding::Utf8Bom => "utf-8-bom",
+            Encoding::Utf16LeBom => "utf-16le-bom",
+        }
+    }
+
+    /// Libellé lisible, pour les messages.
+    pub fn label(self) -> &'static str {
+        match self {
+            Encoding::Utf8 => "UTF-8 sans BOM",
+            Encoding::Utf8Bom => "UTF-8 avec BOM",
+            Encoding::Utf16LeBom => "UTF-16 LE avec BOM",
+        }
+    }
+
+    pub fn has_bom(self) -> bool {
+        !matches!(self, Encoding::Utf8)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CsvError {
-    #[error("CSV: UTF-8 invalide à l'octet {offset}")]
-    InvalidUtf8 { offset: usize },
+    #[error("CSV: encodage détecté {encoding}, mais {detail} (à l'octet {offset})")]
+    InvalidEncoding {
+        encoding: &'static str,
+        offset: usize,
+        detail: String,
+    },
+    #[error("CSV: encodage {encoding} détecté (BOM {bom}), non pris en charge: seuls UTF-8 (avec ou sans BOM) et UTF-16 LE avec BOM sont lus")]
+    UnsupportedEncoding {
+        encoding: &'static str,
+        bom: &'static str,
+    },
     #[error("CSV: fichier vide")]
     Empty,
     #[error("CSV ligne {line}: guillemet fermant manquant (cellule quotée jamais terminée)")]
@@ -85,7 +136,8 @@ pub struct CsvRecord {
 /// Une DataTable lue, avec tout ce qu'il faut pour la réécrire à l'identique.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table {
-    pub bom: bool,
+    /// Encodage du fichier, BOM compris (UTF-8, UTF-8 avec BOM, UTF-16 LE avec BOM).
+    pub encoding: Encoding,
     pub newline: Newline,
     /// Le fichier se termine par une fin de ligne.
     pub final_newline: bool,
@@ -97,17 +149,11 @@ pub struct Table {
 
 impl Table {
     pub fn parse(bytes: &[u8]) -> Result<Table, CsvError> {
-        let text = std::str::from_utf8(bytes).map_err(|e| CsvError::InvalidUtf8 {
-            offset: e.valid_up_to(),
-        })?;
-        let (bom, text) = match text.strip_prefix(BOM) {
-            Some(rest) => (true, rest),
-            None => (false, text),
-        };
+        let (encoding, text) = decode(bytes)?;
         if text.is_empty() {
             return Err(CsvError::Empty);
         }
-        Parser::new(text).run(bom)
+        Parser::new(&text).run(encoding)
     }
 
     /// Les lignes de données sous forme de `RawRow`, prêtes pour `validate_row`.
@@ -128,6 +174,66 @@ impl Table {
                     .collect(),
             })
             .collect()
+    }
+}
+
+/// Détecte l'encodage par le BOM et décode le texte (BOM retiré). Sans BOM: UTF-8 strict.
+fn decode(bytes: &[u8]) -> Result<(Encoding, String), CsvError> {
+    if let Some(body) = bytes.strip_prefix(&UTF16_LE_BOM) {
+        let encoding = Encoding::Utf16LeBom;
+        if body.len() % 2 != 0 {
+            return Err(CsvError::InvalidEncoding {
+                encoding: encoding.label(),
+                offset: bytes.len() - 1,
+                detail: format!(
+                    "la longueur est impaire ({} octets; un fichier UTF-16 a un nombre pair d'octets): \
+                     fichier tronqué ou corrompu",
+                    bytes.len()
+                ),
+            });
+        }
+        let mut text = String::with_capacity(body.len() / 2);
+        let units = body
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]));
+        let mut index = 0usize;
+        for decoded in char::decode_utf16(units) {
+            match decoded {
+                Ok(c) => {
+                    index += c.len_utf16();
+                    text.push(c);
+                }
+                Err(e) => {
+                    return Err(CsvError::InvalidEncoding {
+                        encoding: encoding.label(),
+                        offset: 2 + 2 * index,
+                        detail: format!(
+                            "unité UTF-16 isolée 0x{:04X} (paire de substitution incomplète, fichier tronqué ou corrompu)",
+                            e.unpaired_surrogate()
+                        ),
+                    })
+                }
+            }
+        }
+        return Ok((encoding, text));
+    }
+    if bytes.starts_with(&UTF16_BE_BOM) {
+        return Err(CsvError::UnsupportedEncoding {
+            encoding: "UTF-16 BE avec BOM",
+            bom: "FE FF",
+        });
+    }
+    let (encoding, body, skipped) = match bytes.strip_prefix(&UTF8_BOM) {
+        Some(rest) => (Encoding::Utf8Bom, rest, UTF8_BOM.len()),
+        None => (Encoding::Utf8, bytes, 0),
+    };
+    match std::str::from_utf8(body) {
+        Ok(text) => Ok((encoding, text.to_owned())),
+        Err(e) => Err(CsvError::InvalidEncoding {
+            encoding: encoding.label(),
+            offset: skipped + e.valid_up_to(),
+            detail: "le fichier n'est pas de l'UTF-8 valide (aucun BOM UTF-16 détecté)".into(),
+        }),
     }
 }
 
@@ -155,15 +261,12 @@ pub enum WriteError {
 }
 
 impl Table {
-    /// Sérialise la table en mémoire, sans aucun accès disque. Chaque cellule est
+    /// Sérialise la table en mémoire, sans aucun accès disque, dans son encodage (BOM compris). Chaque cellule est
     /// réécrite avec son quoting d'origine ; une cellule non quotée dont le texte
     /// exigerait des guillemets (cas impossible après `parse`) est quotée d'office.
     pub fn to_bytes(&self) -> Vec<u8> {
         let nl = self.newline.as_str();
         let mut out = String::new();
-        if self.bom {
-            out.push(BOM);
-        }
         let mut records = std::iter::once(&self.header).chain(&self.rows).peekable();
         while let Some(rec) = records.next() {
             for (i, cell) in rec.cells.iter().enumerate() {
@@ -176,7 +279,15 @@ impl Table {
                 out.push_str(nl);
             }
         }
-        out.into_bytes()
+        match self.encoding {
+            Encoding::Utf8 => out.into_bytes(),
+            Encoding::Utf8Bom => [&UTF8_BOM[..], out.as_bytes()].concat(),
+            Encoding::Utf16LeBom => {
+                let mut bytes = UTF16_LE_BOM.to_vec();
+                bytes.extend(out.encode_utf16().flat_map(u16::to_le_bytes));
+                bytes
+            }
+        }
     }
 
     /// Ajoute une ligne validée. Convention des nouvelles lignes, observée dans les
@@ -414,8 +525,9 @@ fn six_decimals(text: &str) -> String {
 impl Table {
     /// Met la table au format des exports du Devkit, quel que soit le format reçu:
     /// en-tête et clés de ligne sans guillemets, valeurs entre guillemets, flottants à six
-    /// décimales (champs `float` du schéma, sans jamais arrondir), fins de ligne LF, sans BOM,
-    /// avec retour final. Les valeurs ne changent pas (hors écriture des flottants).
+    /// décimales (champs `float` du schéma, sans jamais arrondir), fins de ligne LF, UTF-8 sans BOM,
+    /// avec retour final. L'appelant peut ensuite restituer l'encodage et les fins de ligne d'un
+    /// fichier existant (`CsvStore::write_with_schema` le fait). Les valeurs ne changent pas (hors écriture des flottants).
     /// Tolérant: une table invalide est mise en forme au mieux, sans erreur.
     pub fn to_devkit_format(&self, schema: &Schema) -> Table {
         let is_float: Vec<bool> = self
@@ -435,7 +547,7 @@ impl Table {
             quoted: false,
         };
         Table {
-            bom: false,
+            encoding: Encoding::Utf8,
             newline: Newline::Lf,
             final_newline: true,
             header: CsvRecord {
@@ -511,7 +623,7 @@ impl Table {
             .map(plain)
             .collect();
         Ok(Table {
-            bom: false,
+            encoding: Encoding::Utf8,
             newline: Newline::Lf,
             final_newline: true,
             header: CsvRecord {
@@ -561,7 +673,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn run(mut self, bom: bool) -> Result<Table, CsvError> {
+    fn run(mut self, encoding: Encoding) -> Result<Table, CsvError> {
         let mut records: Vec<CsvRecord> = Vec::new();
         let mut final_newline: bool;
         loop {
@@ -600,7 +712,7 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(Table {
-            bom,
+            encoding,
             newline: self.newline.unwrap_or(Newline::Lf),
             final_newline,
             header,
@@ -730,7 +842,7 @@ mod tests {
     #[test]
     fn reads_the_real_devkit_fixture() {
         let t = Table::parse(&fixture()).unwrap();
-        assert!(!t.bom);
+        assert_eq!(t.encoding, Encoding::Utf8);
         assert_eq!(t.newline, Newline::Lf);
         assert!(t.final_newline);
         assert_eq!(
@@ -843,7 +955,7 @@ mod tests {
     fn bom_detected_and_not_part_of_the_header() {
         // non validé sur un export Devkit réel
         let t = Table::parse(b"\xef\xbb\xbf---,A\n1,2\n").unwrap();
-        assert!(t.bom);
+        assert_eq!(t.encoding, Encoding::Utf8Bom);
         assert_eq!(t.header.cells[0].text, "---");
     }
 
@@ -888,7 +1000,11 @@ mod tests {
         assert_eq!(Table::parse(b"\xef\xbb\xbf").unwrap_err(), CsvError::Empty);
         assert!(matches!(
             Table::parse(b"---,A\n1,\xff\n").unwrap_err(),
-            CsvError::InvalidUtf8 { offset: 8 }
+            CsvError::InvalidEncoding {
+                encoding: "UTF-8 sans BOM",
+                offset: 8,
+                ..
+            }
         ));
         assert!(matches!(
             parse("---,A\n1,\"abc\n").unwrap_err(),
@@ -1106,5 +1222,112 @@ mod tests {
         .unwrap();
         t.push_row(&row).unwrap();
         assert_eq!(t.to_bytes(), b"---,A\n1,\"2\"\n2,\"3\"");
+    }
+
+    fn utf16le(text: &str) -> Vec<u8> {
+        let mut v = vec![0xFF, 0xFE];
+        v.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        v
+    }
+
+    #[test]
+    fn encoding_is_detected_by_the_bom_and_the_bom_is_not_part_of_the_text() {
+        let text = "---,A\r\n1,\"épée, \"\"x\"\" ⚔\"\r\n";
+        let u16t = Table::parse(&utf16le(text)).unwrap();
+        assert_eq!(u16t.encoding, Encoding::Utf16LeBom);
+        assert_eq!(u16t.newline, Newline::CrLf);
+        assert_eq!(u16t.header.cells[0].text, "---");
+        assert_eq!(u16t.rows[0].cells[1].text, "épée, \"x\" ⚔");
+        let u8b = Table::parse(&[&UTF8_BOM[..], text.as_bytes()].concat()).unwrap();
+        assert_eq!(u8b.encoding, Encoding::Utf8Bom);
+        assert_eq!(u8b.rows[0].cells[1].text, "épée, \"x\" ⚔");
+        let plain = Table::parse(text.as_bytes()).unwrap();
+        assert_eq!(plain.encoding, Encoding::Utf8);
+        // même contenu, trois encodages
+        assert_eq!(u16t.rows, u8b.rows);
+        assert_eq!(u8b.rows, plain.rows);
+    }
+
+    #[test]
+    fn every_encoding_serializes_back_to_the_exact_bytes() {
+        let text = "---,A\r\n1,\"épée, \"\"x\"\" ⚔\"\r\n";
+        for bytes in [
+            utf16le(text),
+            [&UTF8_BOM[..], text.as_bytes()].concat(),
+            text.as_bytes().to_vec(),
+            // astral (paire de substitution) et absence de retour final
+            utf16le("---,A\n1,\"𝕊 rune ᚠ\""),
+        ] {
+            assert_eq!(Table::parse(&bytes).unwrap().to_bytes(), bytes);
+        }
+    }
+
+    #[test]
+    fn utf16_with_an_odd_length_is_an_error_naming_the_encoding() {
+        let mut bytes = utf16le("---,A\n1,2\n");
+        bytes.pop();
+        let e = Table::parse(&bytes).unwrap_err();
+        let CsvError::InvalidEncoding {
+            encoding,
+            offset,
+            ref detail,
+        } = e
+        else {
+            panic!("{e}")
+        };
+        assert_eq!(encoding, "UTF-16 LE avec BOM");
+        assert_eq!(offset, bytes.len() - 1);
+        assert!(detail.contains("impaire"), "{detail}");
+        let message = e.to_string();
+        assert!(
+            message.contains("UTF-16 LE avec BOM") && message.contains("impaire"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn utf16_with_a_lone_surrogate_reports_its_offset() {
+        let mut bytes = utf16le("---,A\n1,x");
+        // unité haute de substitution sans sa suivante, en fin de fichier
+        bytes.extend([0x3D, 0xD8]);
+        let e = Table::parse(&bytes).unwrap_err();
+        let CsvError::InvalidEncoding {
+            encoding,
+            offset,
+            ref detail,
+        } = e
+        else {
+            panic!("{e}")
+        };
+        assert_eq!(encoding, "UTF-16 LE avec BOM");
+        assert_eq!(offset, bytes.len() - 2);
+        assert!(detail.contains("0xD83D"), "{detail}");
+    }
+
+    #[test]
+    fn invalid_utf8_after_a_bom_counts_the_bom_in_the_offset_and_names_the_encoding() {
+        let e = Table::parse(b"\xef\xbb\xbf---,A\n1,\xff\n").unwrap_err();
+        assert!(
+            matches!(
+                e,
+                CsvError::InvalidEncoding {
+                    encoding: "UTF-8 avec BOM",
+                    offset: 11,
+                    ..
+                }
+            ),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn utf16_big_endian_is_refused_by_name_and_an_empty_utf16_file_is_empty() {
+        let e = Table::parse(&[0xFE, 0xFF, 0x00, 0x2D]).unwrap_err();
+        assert!(
+            matches!(e, CsvError::UnsupportedEncoding { bom: "FE FF", .. }),
+            "{e}"
+        );
+        assert!(e.to_string().contains("UTF-16 BE"));
+        assert_eq!(Table::parse(&[0xFF, 0xFE]).unwrap_err(), CsvError::Empty);
     }
 }

@@ -171,7 +171,10 @@ async fn read_returns_columns_rows_and_format() {
     );
     assert_eq!(
         v["format"],
-        json!({"bom": false, "newline": "LF", "final_newline": true})
+        json!({
+            "encoding": "utf-8", "encoding_label": "UTF-8 sans BOM", "bom": false,
+            "newline": "LF", "final_newline": true
+        })
     );
 }
 

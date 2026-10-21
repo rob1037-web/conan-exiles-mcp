@@ -140,10 +140,19 @@ nouvel asset.
 **Format du fichier écrit.** Le contenu reçu est toujours remis au format des exports du Devkit
 avant comparaison et écriture : en-tête et clés de ligne sans guillemets, valeurs entre
 guillemets, flottants à six décimales (`20` devient `"20.000000"`, sans jamais arrondir une valeur
-qui aurait plus de six décimales), fins de ligne LF, sans BOM, avec retour final. Claude n'a donc
+qui aurait plus de six décimales), avec retour final. Claude n'a donc
 pas à reproduire le format exact : le diff compare les **valeurs**, jamais les guillemets, et ne
 montre que les vrais changements. Le rapport indique « Format : le contenu reçu a été remis au
 format du Devkit » quand c'est arrivé.
+
+**Encodage.** Le Devkit exporte en ASCII quand tout le texte est ASCII, sinon en **UTF-16 LE avec
+BOM** (`FF FE`). Le serveur lit l'encodage d'après le BOM (`FF FE` UTF-16 LE, `EF BB BF` UTF-8 avec
+BOM, sinon UTF-8 strict) et `read_datatable` le renvoie dans `format.encoding` (`utf-16le-bom`,
+`utf-8-bom`, `utf-8`). À l'écriture, un fichier **existant** garde exactement son encodage, son BOM et
+ses fins de ligne (CRLF compris) : Claude envoie du texte UTF-8, le fichier reste en UTF-16 si c'était
+le cas. Un **nouveau** fichier est écrit en UTF-8 sans BOM, fins de ligne LF. Le rapport des dry-runs
+indique « Encodage : … ». Un fichier tronqué ou invalide (p. ex. UTF-16 de longueur impaire) est refusé
+avec une erreur qui nomme l'encodage détecté ; UTF-16 BE n'est pas pris en charge.
 
 Garde-fous : l'écriture réelle est refusée si le schéma est absent, malformé, si l'en-tête ne
 correspond pas, ou si une seule valeur est invalide. **Il n'existe aucun mode « forcer ».** Un
