@@ -8,7 +8,7 @@ tel quel : c'est une information, pas forcément un bug.
 
 ## Résultats de la recette (Robin, vrai Devkit)
 
-Binaire déployé : SHA256 `5d94a98f…c6741` vérifié (build du correctif d'encodage).
+Binaires déployés : SHA256 `5d94a98f…c6741` (correctif d'encodage), puis `09c46bbc…8b641254` (correctif E3, validé).
 
 | Partie | Résultat |
 |---|---|
@@ -16,7 +16,8 @@ Binaire déployé : SHA256 `5d94a98f…c6741` vérifié (build du correctif d'en
 | Cas d'erreur `Timeout` | **Non vérifié** : impossible à provoquer sur le Devkit. Couvert uniquement par les tests automatiques (faux éditeur). |
 | 7.2 Lecture | **OK** : `LoreObjectsTable.csv` réel, 316 lignes, `format` = `utf-16le-bom`, `LF`, `final_newline: true`. `validate_rows` OK après correction du schéma (voir écart E2). |
 | 7.3 Réécriture à l'identique | **OK, par une autre voie** : `add_row` puis `delete_row` de la clé `99001` (virgule, accents, guillemets doublés), en réel. SHA256 final **identique** à l'original (`5b01e2d3…69f58387`), `fc /b` contre le `.backup` : **aucune différence**. |
-| 7.4 Réimport dans `Mods/test` | **Partiel** : réimport OK (ligne `99001` écrite par `add_row`, UTF-16 conservé, aucune colonne décalée, accents et virgules intacts). **Écart E3** : un `NSLOCTEXT` avec des guillemets bruts dans le texte s'affiche brut dans Unreal. Correctif fait (voir E3) ; **à refaire** avec la forme échappée. |
+| 7.4 Réimport dans `Mods/test` | **OK** (après correction de E3, binaire `09c46bbc…8b641254`) : `add_row` en forme échappée sur une copie de `LoreObjectsTable.csv`, réimport dans `Mods/test` (row struct `LoreInfo`) : `Name` et `Description_One` affichés correctement, sans `NSLOCTEXT` visible, champs vides et `None` conformes. Asset de test supprimé, *Save All* vide, dossier `roundtrip` supprimé. |
+| E3 `validate_rows` / refus | **OK** : guillemets bruts refusés en `MalformedLocText` (position 36, message clair) ; `\"` accepté ; apostrophe non échappée acceptée (pas de faux positif, Unreal l'interprète bien). Le fichier de la première tentative est détecté en `MalformedLocText` à la ligne 318 et l'outil refuse d'y écrire. |
 
 Écarts et remarques :
 
@@ -25,7 +26,7 @@ Binaire déployé : SHA256 `5d94a98f…c6741` vérifié (build du correctif d'en
 - **E2 (schéma, hors dépôt)** : les colonnes `Name` et `Description_One` de `LoreObjectsTable` ont des cellules vides dans
   l'export réel ; elles ont été passées en `required = false` dans le schéma du `SCHEMA_ROOT` de Robin. Ce schéma n'est
   pas versionné (`schemas/` ne contient que les exemples).
-- **E3 (corrigé, à revalider dans le Devkit)** : dans un `NSLOCTEXT("espace", "clé", "texte")`, le texte est échappé comme
+- **E3 (corrigé et validé dans le Devkit)** : dans un `NSLOCTEXT("espace", "clé", "texte")`, le texte est échappé comme
   en C++ : `\"` pour un guillemet, `\'` pour une apostrophe, `\r\n` (échappements, pas un saut de ligne) pour un
   retour à la ligne (observé sur l'export réel, clés 14, 34 et 1011). Une valeur avec des guillemets **bruts** s'importait
   sans erreur mais s'affichait brute. Désormais, toute valeur `NSLOCTEXT(` d'une colonne `string` est vérifiée : mal
@@ -36,8 +37,9 @@ Binaire déployé : SHA256 `5d94a98f…c6741` vérifié (build du correctif d'en
   fichier réel. Elle est couverte par les tests automatiques sur les fixtures synthétiques, mais pas validée sur l'export
   réel. Le round-trip a été prouvé par `add_row` + `delete_row`, qui passent par le même chemin d'écriture
   (`write_with_schema`).
-- **Phase 4b : case non cochée** dans `CLAUDE.md` tant que le réimport (7.4) n'est pas validé ; **pas de tag `v0.2.0`**
-  avant cela.
+- **Phase 4b close** : recette validée (sections 2 à 4, 7.2, 7.3, 7.4 et E3), sauf le cas d'erreur `Timeout`
+  (non provocable sur le Devkit, couvert par les tests automatiques) et la réécriture complète par `write_datatable`
+  sur le fichier réel (7.3). Case cochée dans `CLAUDE.md`, version `v0.2.0`.
 
 ## 0. Ce que font les deux outils
 
@@ -257,17 +259,18 @@ l'erreur : c'est peut-être un cas limite à corriger dans le parseur ou dans le
 
 ### 7.4 Réimport dans le Devkit, puis suppression
 
-**État : partiel** (7.2 et 7.3 validés, réimport de la ligne `99001` OK, écart E3 corrigé : voir les résultats en tête de
-document). **À refaire pour valider E3** :
+**État : OK** (voir les résultats en tête de document). Pour la table `LoreObjectsTable`, la forme validée est celle
+de E3 : `add_row` avec un texte en forme échappée, puis réimport. Procédure de revalidation d'un texte avec guillemets,
+apostrophe et retour à la ligne :
 
-1. Avec le binaire corrigé, `validate_rows` sur une ligne dont le texte contient des guillemets bruts : attendu
-   `MalformedLocText` (avec la position et le format attendu). `add_row` en réel avec la même valeur : refusé,
-   fichier inchangé.
-2. `add_row` d'une ligne dont le texte contient les trois cas, en **forme échappée** :
-   `NSLOCTEXT("", "<clé 32 hexadécimaux>", "Il dit \"non\", c\'est fini.\r\nDeuxième ligne.")`.
-3. Réimporter le CSV dans `Mods/test`, ouvrir la table : le texte s'affiche avec ses guillemets, son apostrophe et son
-   retour à la ligne (plus de texte brut). Puis supprimer l'asset importé et la ligne de test (`delete_row`).
+- `validate_rows` sur une ligne dont le texte contient des guillemets bruts : attendu `MalformedLocText` (position et
+  format attendu) ; `add_row` en réel avec la même valeur : refusé, fichier inchangé.
+- `add_row` en **forme échappée** :
+  `NSLOCTEXT("", "<clé 32 hexadécimaux>", "Il dit \"non\", c\'est fini.\r\nDeuxième ligne.")`.
+- Réimporter, ouvrir la table : le texte s'affiche avec ses guillemets, son apostrophe et son retour à la ligne.
+  Puis supprimer l'asset importé et la ligne de test (`delete_row`).
 
+Procédure générale :
 
 1. Importer `roundtrip/<table>.csv` (le fichier réécrit, pas l'original) comme **nouvelle DataTable
    dans `Mods/test`**, nom différent (p. ex. `DT_Test_Textes_Import`), **row struct de la table**,

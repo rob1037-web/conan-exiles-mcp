@@ -1,6 +1,6 @@
 # Conan Exiles Devkit — serveur MCP
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue)](#versions)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue)](#versions)
 [![Statut](https://img.shields.io/badge/statut-pr%C3%A9--version%20(en%20d%C3%A9veloppement)-orange)](#feuille-de-route)
 [![Rust](https://img.shields.io/badge/rust-stable%20%7C%20edition%202021-informational)](https://www.rust-lang.org/)
 [![Plateforme](https://img.shields.io/badge/cible-Windows%20(d%C3%A9veloppement%20sous%20WSL)-lightgrey)](#compilation)
@@ -13,7 +13,7 @@ sur les **Blueprints**.
 > un schéma, écrit le CSV prêt à importer dans un dossier séparé du mod, puis le modeleur le
 > réimporte dans le Devkit et branche ses Blueprints.
 
-> **Version 0.1.0 — pré-version.** Le projet est en cours de développement actif : les outils
+> **Version 0.2.0 — pré-version.** Le projet est en cours de développement actif : les outils
 > peuvent changer de forme d'une version à l'autre (voir la [feuille de route](#feuille-de-route)).
 > Projet de fan, **non affilié à Funcom**. Conan Exiles est une marque de Funcom.
 
@@ -174,9 +174,9 @@ docs/          mode d'emploi, intégration Claude Desktop, notes du pont Unreal
 | 2 | Serveur MCP stdio, dry-run + diff, sauvegarde, écriture atomique | Terminé |
 | 3a | Schémas obligatoires, `list_schemas`, `describe_schema`, `validate_rows` | Terminé |
 | 3b | Opérations par ligne : `add_row`, `update_row`, `delete_row` | Close (recette validée dans Claude Desktop et le Devkit) |
-| 3 (suite) | Génération de 20 lignes en conditions réelles, réimport dans le Devkit, cas limites du CSV (virgules, guillemets, accents) sur un export réel | **En cours** : l'export réel avec accents (UTF-16 LE) est maintenant lu et réécrit à l'identique ; round-trip validé sur la table réelle (316 lignes, SHA256 identique), réimport à faire |
+| 3 (suite) | Génération de 20 lignes en conditions réelles, réimport dans le Devkit, cas limites du CSV (virgules, guillemets, accents) sur un export réel | **En cours** : l'export réel avec accents (UTF-16 LE) est maintenant lu et réécrit à l'identique ; round-trip et réimport validés sur la table réelle `LoreObjectsTable` (316 lignes, SHA256 identique) ; reste la génération de 20 lignes en conditions réelles |
 | 4a | Pont de lecture vers l'éditeur Unreal (*Python Remote Execution*) : `ue_status`, `ue_search_assets`, `ue_describe_asset`, `ue_blueprint_variables` | Close (fusionnée dans `main`) |
-| 4b | Lecture des valeurs par défaut des Blueprints (`ue_get_defaults`, `ue_diff_defaults`), prérequis de toute écriture | **En cours** : code et tests faits, recette Devkit validée sauf le réimport d'un CSV ([procédure et résultats](docs/phase-4b-test.md)) |
+| 4b | Lecture des valeurs par défaut des Blueprints (`ue_get_defaults`, `ue_diff_defaults`), prérequis de toute écriture | Close (0.2.0) : recette validée sur le Devkit ([procédure et résultats](docs/phase-4b-test.md)) |
 | 4c | Écriture des valeurs par défaut dans le Devkit (dry-run issu de `ue_diff_defaults`) | Prévu |
 | 4 (suite) | Autres formats de configuration texte du mod | Prévu |
 | 4 (suite) | Outil `create_schema_from_fixture` (déduire un schéma d'un export) | Prévu |
@@ -192,23 +192,23 @@ automatique de CSV.
 Le projet suit le [versionnement sémantique](https://semver.org/lang/fr/). Tant que la version
 majeure est `0`, l'interface des outils peut encore changer.
 
-- **0.1.0** — première version publique : outils CSV complets (lecture, validation, écriture, opérations par ligne) et outils de lecture du pont Unreal (15 outils MCP), encore en cours de stabilisation.
-- **Depuis la 0.1.0, non publié** (en cours de recette) :
+- **0.2.0** — phase 4b close (recette validée sur le Devkit) :
   - `ue_diff_defaults` compare des valeurs **proposées** à un Blueprint (dry-run), avec arrondi float 32 bits
     et avertissement `not_representable` pour `real(float)`, comparaison exacte pour `real(double)` ;
   - `ue_get_defaults` expose `precision`, `pin_category` et `raw` ;
+  - **lecture et écriture des CSV UTF-16 LE / UTF-8 avec BOM** (correctif : un export réel du Devkit avec
+    accents était refusé), format du fichier existant conservé à l'octet près ;
   - **vérification de la syntaxe des textes `NSLOCTEXT(...)`** : trois littéraux, `\"`, `\'` et `\r\n` échappés ; une valeur
     mal formée (guillemets bruts, qu'Unreal afficherait tels quels) est signalée par `validate_rows` et les dry-runs
-    (`MalformedLocText`) et l'écriture réelle est refusée ;
-  - **lecture et écriture des CSV UTF-16 LE / UTF-8 avec BOM** (correctif : un export réel du Devkit avec
-    accents était refusé), format du fichier existant conservé à l'octet près.
+    (`MalformedLocText`) et l'écriture réelle est refusée.
+- **0.1.0** — première version publique : outils CSV complets (lecture, validation, écriture, opérations par ligne) et outils de lecture du pont Unreal (15 outils MCP).
 
 ## Limites connues
 
 - Le format JSON des DataTables n'est pas géré.
-- Les cas limites du CSV (texte avec virgules, guillemets, accents) sont couverts par des fixtures
-  synthétiques (UTF-16 LE, UTF-8 avec BOM, ASCII) ; la validation complète sur un export réel du Devkit
-  (lecture, réécriture, réimport) est en cours.
+- Les cas limites du CSV (texte avec virgules, guillemets, accents) sont validés sur un export réel
+  (`LoreObjectsTable`, UTF-16 LE) et couverts par des fixtures synthétiques (UTF-16 LE, UTF-8 avec BOM, ASCII).
+  Le cas d'erreur `Timeout` du pont Unreal n'est couvert que par les tests automatiques.
 - UTF-16 BE n'est pas pris en charge (erreur explicite) ; le Devkit n'en produit pas à notre connaissance.
 - Le pont Unreal est en lecture seule et expérimental ; il suppose un éditeur ouvert avec
   *Python Remote Execution* activé.
