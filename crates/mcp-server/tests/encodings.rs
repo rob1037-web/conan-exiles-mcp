@@ -82,10 +82,10 @@ async fn read_datatable_reports_the_detected_encoding_and_keeps_the_texts_intact
         );
         assert_eq!(v["columns"], json!(["---", "Name", "Text", "Category"]));
         assert_eq!(v["rows"][0][0], "Lore_001");
-        // FText NSLOCTEXT: guillemets doublés du CSV ramenés à un seul, virgule gardée
+        // FText NSLOCTEXT: virgule gardée, guillemets du CSV défaits
         let name = v["rows"][0][1].as_str().unwrap();
         assert!(
-            name.starts_with("NSLOCTEXT(\"\", \"Lore_001_Name\", \""),
+            name.starts_with("NSLOCTEXT(\"\", \"C975A22C44D0E510FAE1558B3736E1CB\", \""),
             "{name}"
         );
         assert!(name.contains(", "), "{name}");
@@ -94,7 +94,7 @@ async fn read_datatable_reports_the_detected_encoding_and_keeps_the_texts_intact
     let r = s.call("read_datatable", json!({"path": FILE})).await;
     assert_eq!(
         structured(&r)["rows"][0][1],
-        "NSLOCTEXT(\"\", \"Lore_001_Name\", \"Épée, longue\")"
+        r#"NSLOCTEXT("", "C975A22C44D0E510FAE1558B3736E1CB", "Épée, longue")"#
     );
 }
 
@@ -166,7 +166,7 @@ async fn rewriting_the_content_read_is_identical_to_the_byte_in_every_encoding()
 async fn row_tools_keep_the_existing_encoding_and_report_it() {
     let (env, s) = setup(UTF16).await;
     let add = json!({"table": "DT_Lore", "key": "Lore_900", "values": {
-        "Name": "NSLOCTEXT(\"\", \"Lore_900_Name\", \"Ñandú, \"\"x\"\"\")",
+        "Name": r#"NSLOCTEXT("", "Lore_900_Name", "Ñandú, \"x\" d\'or")"#,
         "Text": "NSLOCTEXT(\"\", \"Lore_900_Text\", \"a, b\")", "Category": "Récit"}});
     let r = s.call("add_row", add.clone()).await;
     assert!(!is_error(&r), "{}", text(&r));
@@ -244,4 +244,83 @@ async fn a_truncated_utf16_file_is_a_clear_tool_error_naming_the_encoding() {
     }
     assert_eq!(file(&env), truncated);
     assert_eq!(backups(&env), 0);
+}
+
+// --- E3: syntaxe NSLOCTEXT -------------------------------------------------------------
+
+/// Le cas E3: guillemets bruts dans le texte (Unreal l'afficherait brut).
+const BAD: &str = r#"NSLOCTEXT("", "Lore_900_Text", "Il dit "non" puis part")"#;
+const GOOD: &str =
+    r#"NSLOCTEXT("", "Lore_900_Text", "Il dit \"non\" puis part, c\'est fini.\r\nFin.")"#;
+
+fn row_with(text: &str) -> serde_json::Value {
+    json!({"table": "DT_Lore", "key": "Lore_900", "values": {
+        "Name": r#"NSLOCTEXT("", "Lore_900_Name", "Nom")"#, "Text": text, "Category": "Récit"}})
+}
+
+#[tokio::test]
+async fn validate_rows_flags_a_malformed_nsloctext_with_the_expected_form() {
+    let (_env, s) = setup(UTF16).await;
+    let rows = |text: &str| {
+        json!({"table": "DT_Lore", "rows": [
+            ["Lore_900", r#"NSLOCTEXT("", "k", "Nom")"#, text, "Récit"]]})
+    };
+    let r = s.call("validate_rows", rows(BAD)).await;
+    let t = text(&r);
+    assert!(t.contains("MalformedLocText"), "{t}");
+    for needle in ["trois littéraux", "\\\"", "\\r\\n", "Lore_900", "'Text'"] {
+        assert!(t.contains(needle), "{needle}: {t}");
+    }
+    let v = structured(&r);
+    assert_eq!(v["valid"], false);
+    assert_eq!(v["errors"][0]["rule"], "MalformedLocText");
+    assert_eq!(v["errors"][0]["column"], "Text");
+    assert_eq!(v["errors"][0]["value"], BAD);
+    // la forme correcte et les autres formes (LOCTABLE, texte brut) passent
+    for ok in [
+        GOOD,
+        r#"LOCTABLE("/Game/Items/Strings/ST_X", "Key")"#,
+        "Texte brut",
+        "",
+    ] {
+        let r = s.call("validate_rows", rows(ok)).await;
+        assert!(
+            !is_error(&r) && structured(&r)["valid"] == true,
+            "{ok}: {}",
+            text(&r)
+        );
+    }
+}
+
+#[tokio::test]
+async fn add_row_with_a_malformed_nsloctext_is_reported_then_refused_and_nothing_is_written() {
+    let (env, s) = setup(UTF16).await;
+    let mut args = row_with(BAD);
+    let r = s.call("add_row", args.clone()).await; // dry-run par défaut
+    assert!(!is_error(&r), "{}", text(&r));
+    assert!(
+        text(&r).contains("VALIDATION ÉCHOUÉE") && text(&r).contains("MalformedLocText"),
+        "{}",
+        text(&r)
+    );
+    args["dry_run"] = json!(false);
+    args["confirm"] = json!(true);
+    let r = s.call("add_row", args).await;
+    assert!(
+        is_error(&r)
+            && text(&r).starts_with("ERREUR ValidationFailed:")
+            && text(&r).contains("MalformedLocText"),
+        "{}",
+        text(&r)
+    );
+    assert_eq!(file(&env), UTF16);
+    assert_eq!(backups(&env), 0);
+
+    // la forme correcte s'écrit, en UTF-16 conservé
+    let mut ok = row_with(GOOD);
+    ok["dry_run"] = json!(false);
+    ok["confirm"] = json!(true);
+    let r = s.call("add_row", ok).await;
+    assert!(!is_error(&r), "{}", text(&r));
+    assert!(file(&env).starts_with(&[0xFF, 0xFE]));
 }

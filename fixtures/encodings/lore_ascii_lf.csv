@@ -1,3 +1,3 @@
 ---,Name,Text,Category
-Lore_001,"NSLOCTEXT("""", ""Lore_001_Name"", ""Long sword, heavy"")","NSLOCTEXT("""", ""Lore_001_Text"", ""He says ""no"", then leaves."")","Story"
-Lore_002,"NSLOCTEXT("""", ""Lore_002_Name"", ""Shield"")","NSLOCTEXT("""", ""Lore_002_Text"", ""Forged in Asgard: glory, honor."")","Legend"
+Lore_001,"NSLOCTEXT("""", ""C975A22C44D0E510FAE1558B3736E1CB"", ""Long sword, heavy"")","NSLOCTEXT(""[01D4587E3401BCF17310899AB495BFD5]"", ""A156DFE041A3D799208675802D640A17"", ""He says \""no\"", then it\'s over."")","Story"
+Lore_002,"NSLOCTEXT("""", ""FA79DA474D03322671A2198301B5C1D1"", ""Shield"")","NSLOCTEXT(""[01D4587E3401BCF17310899AB495BFD5]"", ""D907AE6A4EEEF65BE2BDCCB74B619B14"", ""Forged in Asgard: glory, honor.\r\n\r\nSecond paragraph, with a comma."")","Legend"

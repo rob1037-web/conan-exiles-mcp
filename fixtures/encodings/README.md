@@ -2,7 +2,9 @@
 
 Fichiers **synthétiques** (générés à la main, pas des exports réels du Devkit) qui reproduisent le format
 observé sur `LoreObjectsTable.csv` : colonnes `---,Name,Text,Category`, valeurs entre guillemets, FText
-`NSLOCTEXT("", "clé", "texte")` (guillemets doublés dans le CSV), virgules et guillemets dans les textes.
+`NSLOCTEXT("espace", "clé", "texte")`, virgules dans les textes. **Échappement des textes** (observé sur l'export réel,
+clés 14, 34 et 1011) : `\"` pour un guillemet, `\'` pour une apostrophe, `\r\n` (échappements, pas un saut de ligne
+brut) pour un retour à la ligne ; le doublement des guillemets (`""`) est celui du CSV, défait au parsing.
 
 | Fichier | Encodage | Fins de ligne |
 |---|---|---|

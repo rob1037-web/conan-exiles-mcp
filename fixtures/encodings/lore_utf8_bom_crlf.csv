@@ -1,4 +1,4 @@
 ﻿---,Name,Text,Category
-Lore_001,"NSLOCTEXT("""", ""Lore_001_Name"", ""Épée, longue"")","NSLOCTEXT("""", ""Lore_001_Text"", ""Il dit ""non"", puis part."")","Récit"
-Lore_002,"NSLOCTEXT("""", ""Lore_002_Name"", ""Bouclier"")","NSLOCTEXT("""", ""Lore_002_Text"", ""Forgé à Æsgard: « gloire, honneur »."")","Légende"
-Lore_003,"NSLOCTEXT("""", ""Lore_003_Name"", ""Hache"")","NSLOCTEXT("""", ""Lore_003_Text"", ""Trois mots, deux virgules, et ""des guillemets""."")","Récit"
+Lore_001,"NSLOCTEXT("""", ""C975A22C44D0E510FAE1558B3736E1CB"", ""Épée, longue"")","NSLOCTEXT(""[01D4587E3401BCF17310899AB495BFD5]"", ""A156DFE041A3D799208675802D640A17"", ""Il dit \""non\"", c\'est fini."")","Récit"
+Lore_002,"NSLOCTEXT("""", ""FA79DA474D03322671A2198301B5C1D1"", ""Bouclier"")","NSLOCTEXT(""[01D4587E3401BCF17310899AB495BFD5]"", ""D907AE6A4EEEF65BE2BDCCB74B619B14"", ""Forgé à Æsgard: « gloire, honneur ».\r\n\r\nSecond paragraphe, avec une virgule."")","Légende"
+Lore_003,"NSLOCTEXT("""", ""A48A431A4296DF3493BEA3BC6FF0B712"", ""Hache"")","NSLOCTEXT(""[01D4587E3401BCF17310899AB495BFD5]"", ""D7D9AA1D40D60CE221446D967E2A010F"", ""Trois mots, deux virgules, et \""des guillemets\""."")","Récit"

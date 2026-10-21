@@ -1042,7 +1042,10 @@ impl ConanServer {
                        lignes [clé, valeur de chaque colonne dans l'ordre du schéma]. Sans `rows`, valide le \
                        CSV existant dans CSV_ROOT (diagnostic de corruption, sans réparation). Toutes les \
                        erreurs sont listées: ligne, clé, colonne, valeur, règle violée. Une différence \
-                       d'en-tête avec le schéma est une dérive de schéma."
+                       d'en-tête avec le schéma est une dérive de schéma. Textes localisés: une valeur `NSLOCTEXT(\"espace\", \"clé\", \"texte\")` doit avoir trois \
+                       littéraux, avec \\\" pour un guillemet, \\' pour une apostrophe et \\r\\n pour un retour à la \
+                       ligne dans le texte (jamais de guillemet ni de saut de ligne bruts), sinon règle \
+                       MalformedLocText et refus."
     )]
     fn validate_rows(
         &self,
@@ -1113,7 +1116,10 @@ impl ConanServer {
                        PAR DÉFAUT dry_run=true: aperçu (diff par clé + rapport de validation) sans rien \
                        écrire. Pour écrire réellement: dry_run=false ET confirm=true, tous deux explicites, \
                        et le contenu doit être valide. Un fichier existant est d'abord sauvegardé dans \
-                       .backup (chemin renvoyé), puis remplacé de façon atomique."
+                       .backup (chemin renvoyé), puis remplacé de façon atomique. Textes localisés: une valeur `NSLOCTEXT(\"espace\", \"clé\", \"texte\")` doit avoir trois \
+                       littéraux, avec \\\" pour un guillemet, \\' pour une apostrophe et \\r\\n pour un retour à la \
+                       ligne dans le texte (jamais de guillemet ni de saut de ligne bruts), sinon règle \
+                       MalformedLocText et refus."
     )]
     fn write_datatable(
         &self,
@@ -1158,7 +1164,10 @@ impl ConanServer {
                        réparation) et la table entière résultante est revalidée. PAR DÉFAUT dry_run=true: \
                        aperçu (diff + validation), rien n'est écrit. Écriture réelle: dry_run=false ET \
                        confirm=true; le CSV existant est d'abord sauvegardé dans .backup. Pour modifier une \
-                       ligne existante, utiliser update_row; pour la supprimer, delete_row."
+                       ligne existante, utiliser update_row; pour la supprimer, delete_row. Textes localisés: une valeur `NSLOCTEXT(\"espace\", \"clé\", \"texte\")` doit avoir trois \
+                       littéraux, avec \\\" pour un guillemet, \\' pour une apostrophe et \\r\\n pour un retour à la \
+                       ligne dans le texte (jamais de guillemet ni de saut de ligne bruts), sinon règle \
+                       MalformedLocText et refus."
     )]
     fn add_row(&self, Parameters(p): Parameters<AddRowParams>) -> Result<CallToolResult, String> {
         guarded(|| {
@@ -1186,7 +1195,10 @@ impl ConanServer {
                        la réponse est « AUCUN CHANGEMENT » sans écriture ni sauvegarde. Le CSV existant doit \
                        être valide (sinon refus, utiliser validate_rows: aucune réparation) et la table \
                        entière résultante est revalidée. PAR DÉFAUT dry_run=true: aperçu (diff + validation). \
-                       Écriture réelle: dry_run=false ET confirm=true; sauvegarde dans .backup avant écriture."
+                       Écriture réelle: dry_run=false ET confirm=true; sauvegarde dans .backup avant écriture. Textes localisés: une valeur `NSLOCTEXT(\"espace\", \"clé\", \"texte\")` doit avoir trois \
+                       littéraux, avec \\\" pour un guillemet, \\' pour une apostrophe et \\r\\n pour un retour à la \
+                       ligne dans le texte (jamais de guillemet ni de saut de ligne bruts), sinon règle \
+                       MalformedLocText et refus."
     )]
     fn update_row(
         &self,

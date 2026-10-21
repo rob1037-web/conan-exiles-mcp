@@ -3,6 +3,7 @@
 
 use std::fmt;
 
+use crate::loctext;
 use crate::schema::{Field, FieldType, Schema};
 use crate::value::{Cell, RawRow, Row, Value};
 
@@ -27,6 +28,8 @@ pub enum Rule {
     NotInEnum,
     /// Nombre de valeurs différent du nombre de colonnes.
     ColumnCount,
+    /// Valeur `NSLOCTEXT(...)` mal formée (voir `loctext`): Unreal l'afficherait brute.
+    MalformedLocText,
 }
 
 impl Rule {
@@ -44,6 +47,7 @@ impl Rule {
             Rule::OutOfRange => "OutOfRange",
             Rule::NotInEnum => "NotInEnum",
             Rule::ColumnCount => "ColumnCount",
+            Rule::MalformedLocText => "MalformedLocText",
         }
     }
 
@@ -233,6 +237,20 @@ fn check_cell(field: &Field, raw: &str) -> Result<Value, (Rule, String)> {
             let n = raw.chars().count();
             if min_len.is_some_and(|m| n < m) || max_len.is_some_and(|m| n > m) {
                 return Err(range());
+            }
+            // Un texte localisé exporté par le Devkit est du code Unreal: syntaxe vérifiée avant écriture.
+            if loctext::is_nsloctext(raw) {
+                loctext::check_nsloctext(raw).map_err(|problem| {
+                    (
+                        Rule::MalformedLocText,
+                        format!(
+                            "NSLOCTEXT(\"espace\", \"clé\", \"texte\") bien formé: trois littéraux entre \
+                             guillemets; dans un littéral, \\\" pour un guillemet, \\' pour une apostrophe, \
+                             \\r\\n pour un retour à la ligne (jamais de guillemet ni de saut de ligne bruts). \
+                             Problème: {problem}"
+                        ),
+                    )
+                })?;
             }
             Ok(Value::String(raw.to_owned()))
         }

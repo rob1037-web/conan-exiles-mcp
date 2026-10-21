@@ -5,6 +5,7 @@ pub mod config;
 pub mod csv;
 pub mod diff;
 pub mod listing;
+pub mod loctext;
 pub mod rowops;
 pub mod sandbox;
 pub mod schema;

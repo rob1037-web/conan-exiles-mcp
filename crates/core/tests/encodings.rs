@@ -131,25 +131,33 @@ fn fixtures_are_detected_and_their_texts_are_intact() {
         assert_eq!(t.header.cells[0].text, "---");
         let name = &t.rows[0].cells[1].text;
         assert!(
-            name.starts_with("NSLOCTEXT(\"\", \"Lore_001_Name\", \""),
+            name.starts_with("NSLOCTEXT(\"\", \"C975A22C44D0E510FAE1558B3736E1CB\", \""),
             "{name}"
         );
-        // virgule et guillemets dans le texte, guillemets doublés du CSV ramenés à un seul
+        // virgule et guillemets dans le texte: échappés `\"` dans le littéral, `""` du CSV défaits
         let text = &t.rows[0].cells[2].text;
         assert!(
-            text.contains("\"no\", ") || text.contains("\"non\", "),
+            text.contains(r#"\"no\", "#) || text.contains(r#"\"non\", "#),
             "{text}"
         );
+        assert!(!text.contains("\"\""), "{text}");
     }
     let t = Table::parse(UTF16).unwrap();
     assert_eq!(
         t.rows[0].cells[1].text,
-        "NSLOCTEXT(\"\", \"Lore_001_Name\", \"Épée, longue\")"
+        r#"NSLOCTEXT("", "C975A22C44D0E510FAE1558B3736E1CB", "Épée, longue")"#
     );
     assert_eq!(
-        t.rows[1].cells[2].text,
-        "NSLOCTEXT(\"\", \"Lore_002_Text\", \"Forgé à Æsgard: « gloire, honneur ».\")"
+        t.rows[0].cells[2].text,
+        r#"NSLOCTEXT("[01D4587E3401BCF17310899AB495BFD5]", "A156DFE041A3D799208675802D640A17", "Il dit \"non\", c\'est fini.")"#
     );
+    // retours à la ligne: deux échappements `\r\n`, jamais un saut de ligne brut
+    let paragraphs = &t.rows[1].cells[2].text;
+    assert!(
+        paragraphs.contains(r"honneur ».\r\n\r\nSecond"),
+        "{paragraphs}"
+    );
+    assert!(!paragraphs.contains('\n') && !paragraphs.contains('\r'));
 }
 
 #[test]
@@ -332,7 +340,7 @@ fn add_update_delete_keep_the_format_and_add_then_delete_restores_the_file() {
             values: vals(&[
                 (
                     "Name",
-                    "NSLOCTEXT(\"\", \"Lore_900_Name\", \"Ñandú, \"\"x\"\"\")",
+                    r#"NSLOCTEXT("", "Lore_900_Name", "Ñandú, \"x\" d\'or")"#,
                 ),
                 ("Text", "NSLOCTEXT(\"\", \"Lore_900_Text\", \"a, b\")"),
                 ("Category", "Récit"),

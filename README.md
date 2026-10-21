@@ -197,6 +197,9 @@ majeure est `0`, l'interface des outils peut encore changer.
   - `ue_diff_defaults` compare des valeurs **proposées** à un Blueprint (dry-run), avec arrondi float 32 bits
     et avertissement `not_representable` pour `real(float)`, comparaison exacte pour `real(double)` ;
   - `ue_get_defaults` expose `precision`, `pin_category` et `raw` ;
+  - **vérification de la syntaxe des textes `NSLOCTEXT(...)`** : trois littéraux, `\"`, `\'` et `\r\n` échappés ; une valeur
+    mal formée (guillemets bruts, qu'Unreal afficherait tels quels) est signalée par `validate_rows` et les dry-runs
+    (`MalformedLocText`) et l'écriture réelle est refusée ;
   - **lecture et écriture des CSV UTF-16 LE / UTF-8 avec BOM** (correctif : un export réel du Devkit avec
     accents était refusé), format du fichier existant conservé à l'octet près.
 

@@ -215,6 +215,25 @@ et la valeur attendue :
 | `WrongType` | Valeur qui n'est pas du type attendu (entier, nombre fini, true/false) |
 | `OutOfRange` | Hors des bornes (`min`/`max`, `min_len`/`max_len`) |
 | `NotInEnum` | Valeur absente de la liste `values` (casse comprise) |
+| `MalformedLocText` | Valeur `NSLOCTEXT(...)` mal formée : Unreal l'afficherait brute. Voir « Textes localisés » ci-dessous |
+
+### Textes localisés (`NSLOCTEXT`)
+
+Dans un export du Devkit, une cellule de texte est du code Unreal :
+`NSLOCTEXT("espace", "clé", "texte")`, trois littéraux entre guillemets. À l'intérieur d'un littéral, le texte
+est échappé comme en C++ : **`\"`** pour un guillemet, **`\'`** pour une apostrophe, **`\r\n`** (ces quatre
+caractères, pas un saut de ligne) pour un retour à la ligne. Le doublement des guillemets (`""`) est celui du
+**CSV** et disparaît au parsing : il ne fait pas partie de la valeur envoyée aux outils.
+
+Exemple de valeur envoyée à `add_row` (un seul niveau d'échappement, celui d'Unreal) :
+`NSLOCTEXT("", "A156DFE041A3D799208675802D640A17", "Il dit \"non\", c\'est fini.")`
+
+Toute valeur qui commence par `NSLOCTEXT(` dans une colonne `string` est vérifiée (trois littéraux, échappements
+admis `\\ \" \' \? \a \b \f \n \r \t \v`, parenthèse fermante, rien après, aucun saut de ligne brut). Une valeur mal
+formée s'importe sans erreur mais s'affiche brute dans Unreal : elle est donc signalée par `validate_rows` et les
+dry-runs (`MalformedLocText`, avec la position du problème) et **l'écriture réelle est refusée**. Les autres formes
+(`LOCTABLE(...)`, texte brut, cellule vide) et les colonnes `raw` ne sont pas vérifiées. Seule la syntaxe est
+contrôlée, pas le format de l'espace de noms ni de la clé.
 
 ### Codes d'erreur d'outil (`ERREUR <code>`)
 
