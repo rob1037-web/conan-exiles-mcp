@@ -101,7 +101,7 @@ fixtures/      # exports réels du Devkit pour les tests
 - [x] Phase 3a : `SCHEMA_ROOT` optionnel, outils `list_schemas`, `describe_schema`, `validate_rows`, validation par schéma obligatoire dans `write_datatable` (table de test `DT_Purge_Nordheimer`)
 - [x] Phase 3b (close, recette validée dans Claude Desktop et le Devkit) : outils `add_row`, `update_row`, `delete_row`
 - [x] Phase 4a (close, fusionnée dans `main`) : pont en lecture seule `ue_status`, `ue_search_assets`, `ue_describe_asset`, `ue_blueprint_variables`
-- [ ] Phase 4b (branche `phase-4b-ue-defaults`) : `ue_get_defaults`, `ue_diff_defaults` (deux Blueprints ou valeurs proposées) — code et tests faits, recette Devkit à faire (`docs/phase-4b-test.md`)
+- [ ] Phase 4b (branche `phase-4b-ue-defaults`) : `ue_get_defaults`, `ue_diff_defaults` (deux Blueprints ou valeurs proposées) — code et tests faits, recette Devkit validée (sections 2 à 4, lecture et round-trip du CSV UTF-16 réel) sauf le réimport 7.4 et `Timeout` (voir `docs/phase-4b-test.md`)
 - [ ] Générer 20 lignes via Claude, réimporter dans le Devkit, vérifier en jeu
 - [ ] Chaque casse à l'import → nouveau test
 - [ ] Exporter une DataTable contenant du texte (virgules, guillemets, accents) pour valider les cas limites du CSV (tests actuellement marqués « non validé sur un export Devkit réel »)

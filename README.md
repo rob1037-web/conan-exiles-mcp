@@ -174,9 +174,9 @@ docs/          mode d'emploi, intégration Claude Desktop, notes du pont Unreal
 | 2 | Serveur MCP stdio, dry-run + diff, sauvegarde, écriture atomique | Terminé |
 | 3a | Schémas obligatoires, `list_schemas`, `describe_schema`, `validate_rows` | Terminé |
 | 3b | Opérations par ligne : `add_row`, `update_row`, `delete_row` | Close (recette validée dans Claude Desktop et le Devkit) |
-| 3 (suite) | Génération de 20 lignes en conditions réelles, réimport dans le Devkit, cas limites du CSV (virgules, guillemets, accents) sur un export réel | **En cours** : l'export réel avec accents (UTF-16 LE) est maintenant lu et réécrit à l'identique ; recette sur la table complète et réimport à faire |
+| 3 (suite) | Génération de 20 lignes en conditions réelles, réimport dans le Devkit, cas limites du CSV (virgules, guillemets, accents) sur un export réel | **En cours** : l'export réel avec accents (UTF-16 LE) est maintenant lu et réécrit à l'identique ; round-trip validé sur la table réelle (316 lignes, SHA256 identique), réimport à faire |
 | 4a | Pont de lecture vers l'éditeur Unreal (*Python Remote Execution*) : `ue_status`, `ue_search_assets`, `ue_describe_asset`, `ue_blueprint_variables` | Close (fusionnée dans `main`) |
-| 4b | Lecture des valeurs par défaut des Blueprints (`ue_get_defaults`, `ue_diff_defaults`), prérequis de toute écriture | **En cours** : code et tests faits, recette dans le Devkit à faire ([procédure](docs/phase-4b-test.md)) |
+| 4b | Lecture des valeurs par défaut des Blueprints (`ue_get_defaults`, `ue_diff_defaults`), prérequis de toute écriture | **En cours** : code et tests faits, recette Devkit validée sauf le réimport d'un CSV ([procédure et résultats](docs/phase-4b-test.md)) |
 | 4c | Écriture des valeurs par défaut dans le Devkit (dry-run issu de `ue_diff_defaults`) | Prévu |
 | 4 (suite) | Autres formats de configuration texte du mod | Prévu |
 | 4 (suite) | Outil `create_schema_from_fixture` (déduire un schéma d'un export) | Prévu |

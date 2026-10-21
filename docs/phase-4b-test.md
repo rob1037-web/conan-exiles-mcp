@@ -6,6 +6,32 @@ sur le vrai Devkit, ce qu'aucun test automatique ne peut faire. Les valeurs « a
 de la sonde du 18 octobre ([phase-4b/sonde.md](phase-4b/sonde.md)) ; si l'une diffère, le noter
 tel quel : c'est une information, pas forcément un bug.
 
+## Résultats de la recette (Robin, vrai Devkit)
+
+Binaire déployé : SHA256 `5d94a98f…c6741` vérifié (build du correctif d'encodage).
+
+| Partie | Résultat |
+|---|---|
+| Sections 2 à 4 (19/10) | **Conformes** : `ue_get_defaults` (float, noms avec espaces), `ue_diff_defaults` avec `16777217` → `not_representable`, valeur stockée `16777216.0`, comparaison de deux Blueprints, cas d'erreur, *Save All* vide (aucun asset modifié), `DevkitNotRunning`. |
+| Cas d'erreur `Timeout` | **Non vérifié** : impossible à provoquer sur le Devkit. Couvert uniquement par les tests automatiques (faux éditeur). |
+| 7.2 Lecture | **OK** : `LoreObjectsTable.csv` réel, 316 lignes, `format` = `utf-16le-bom`, `LF`, `final_newline: true`. `validate_rows` OK après correction du schéma (voir écart E2). |
+| 7.3 Réécriture à l'identique | **OK, par une autre voie** : `add_row` puis `delete_row` de la clé `99001` (virgule, accents, guillemets doublés), en réel. SHA256 final **identique** à l'original (`5b01e2d3…69f58387`), `fc /b` contre le `.backup` : **aucune différence**. |
+| 7.4 Réimport dans `Mods/test` | **Pas encore fait.** |
+
+Écarts et remarques :
+
+- **E1 (corrigé)** : le vrai export est en UTF-16 LE avec BOM, ce que le serveur refusait (`InvalidCsv`, « UTF-8 invalide à
+  l'octet 0 »). Corrigé, vérifié par la ligne 7.2 ci-dessus.
+- **E2 (schéma, hors dépôt)** : les colonnes `Name` et `Description_One` de `LoreObjectsTable` ont des cellules vides dans
+  l'export réel ; elles ont été passées en `required = false` dans le schéma du `SCHEMA_ROOT` de Robin. Ce schéma n'est
+  pas versionné (`schemas/` ne contient que les exemples).
+- **7.3 incomplet** : la réécriture complète par `write_datatable` (contenu envoyé en entier) n'a pas été essayée sur le
+  fichier réel. Elle est couverte par les tests automatiques sur les fixtures synthétiques, mais pas validée sur l'export
+  réel. Le round-trip a été prouvé par `add_row` + `delete_row`, qui passent par le même chemin d'écriture
+  (`write_with_schema`).
+- **Phase 4b : case non cochée** dans `CLAUDE.md` tant que le réimport (7.4) n'est pas validé ; **pas de tag `v0.2.0`**
+  avant cela.
+
 ## 0. Ce que font les deux outils
 
 - `ue_get_defaults(object_path, section?, component?, names?, expand?, start?)` : lit les valeurs par
@@ -223,6 +249,8 @@ l'erreur : c'est peut-être un cas limite à corriger dans le parseur ou dans le
    Une sauvegarde apparaît dans `.backup\`.
 
 ### 7.4 Réimport dans le Devkit, puis suppression
+
+**État : à faire** (7.2 et 7.3 validés, voir les résultats en tête de document).
 
 1. Importer `roundtrip/<table>.csv` (le fichier réécrit, pas l'original) comme **nouvelle DataTable
    dans `Mods/test`**, nom différent (p. ex. `DT_Test_Textes_Import`), **row struct de la table**,
