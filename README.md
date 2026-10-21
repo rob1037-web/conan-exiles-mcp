@@ -28,6 +28,10 @@ sur les **Blueprints**.
 - **Pas de schéma valide = pas d'écriture.** Même le dry-run est refusé sans schéma.
 - **Fidélité des formats.** Chaque valeur garde sa représentation texte d'origine : le round-trip
   est exact à l'octet, sans normalisation des flottants, booléens ou guillemets.
+- **Encodages du Devkit.** Le Devkit exporte en ASCII, ou en **UTF-16 LE avec BOM** dès qu'un texte
+  contient un caractère non ASCII. Le serveur détecte l'encodage par le BOM (UTF-16 LE, UTF-8 avec ou
+  sans BOM) et réécrit un fichier existant avec exactement le même encodage, le même BOM et les mêmes
+  fins de ligne (CRLF compris). Un nouveau fichier est écrit en UTF-8 sans BOM, LF.
 
 ## Garde-fous de sécurité
 
@@ -51,7 +55,7 @@ Les erreurs sont renvoyées sous la forme `ERREUR <code>: <message>`, lisibles p
 | Outil | Rôle |
 |---|---|
 | `list_mod_files` | Liste les fichiers de `CSV_ROOT` (ou du mod avec `source:"mod"`, en lecture seule). |
-| `read_datatable` | Lit une DataTable CSV (en-tête, lignes, format). |
+| `read_datatable` | Lit une DataTable CSV (en-tête, lignes, format dont l'encodage détecté). |
 | `list_schemas` | Liste les schémas disponibles et leur validité. |
 | `describe_schema` | Renvoie l'en-tête attendu, les colonnes, types, bornes et valeurs d'énumération. |
 | `validate_rows` | Valide des lignes (ou un CSV existant) contre un schéma, sans rien écrire. |
@@ -170,7 +174,7 @@ docs/          mode d'emploi, intégration Claude Desktop, notes du pont Unreal
 | 2 | Serveur MCP stdio, dry-run + diff, sauvegarde, écriture atomique | Terminé |
 | 3a | Schémas obligatoires, `list_schemas`, `describe_schema`, `validate_rows` | Terminé |
 | 3b | Opérations par ligne : `add_row`, `update_row`, `delete_row` | Close (recette validée dans Claude Desktop et le Devkit) |
-| 3 (suite) | Génération de 20 lignes en conditions réelles, réimport dans le Devkit, cas limites du CSV (virgules, guillemets, accents) sur un export réel | **En cours** |
+| 3 (suite) | Génération de 20 lignes en conditions réelles, réimport dans le Devkit, cas limites du CSV (virgules, guillemets, accents) sur un export réel | **En cours** : l'export réel avec accents (UTF-16 LE) est maintenant lu et réécrit à l'identique ; recette sur la table complète et réimport à faire |
 | 4a | Pont de lecture vers l'éditeur Unreal (*Python Remote Execution*) : `ue_status`, `ue_search_assets`, `ue_describe_asset`, `ue_blueprint_variables` | Close (fusionnée dans `main`) |
 | 4b | Lecture des valeurs par défaut des Blueprints (`ue_get_defaults`, `ue_diff_defaults`), prérequis de toute écriture | **En cours** : code et tests faits, recette dans le Devkit à faire ([procédure](docs/phase-4b-test.md)) |
 | 4c | Écriture des valeurs par défaut dans le Devkit (dry-run issu de `ue_diff_defaults`) | Prévu |
@@ -189,12 +193,20 @@ Le projet suit le [versionnement sémantique](https://semver.org/lang/fr/). Tant
 majeure est `0`, l'interface des outils peut encore changer.
 
 - **0.1.0** — première version publique : outils CSV complets (lecture, validation, écriture, opérations par ligne) et outils de lecture du pont Unreal (15 outils MCP), encore en cours de stabilisation.
+- **Depuis la 0.1.0, non publié** (en cours de recette) :
+  - `ue_diff_defaults` compare des valeurs **proposées** à un Blueprint (dry-run), avec arrondi float 32 bits
+    et avertissement `not_representable` pour `real(float)`, comparaison exacte pour `real(double)` ;
+  - `ue_get_defaults` expose `precision`, `pin_category` et `raw` ;
+  - **lecture et écriture des CSV UTF-16 LE / UTF-8 avec BOM** (correctif : un export réel du Devkit avec
+    accents était refusé), format du fichier existant conservé à l'octet près.
 
 ## Limites connues
 
 - Le format JSON des DataTables n'est pas géré.
-- Les cas limites du CSV (texte avec virgules, guillemets, accents) restent à valider sur un export
-  réel du Devkit.
+- Les cas limites du CSV (texte avec virgules, guillemets, accents) sont couverts par des fixtures
+  synthétiques (UTF-16 LE, UTF-8 avec BOM, ASCII) ; la validation complète sur un export réel du Devkit
+  (lecture, réécriture, réimport) est en cours.
+- UTF-16 BE n'est pas pris en charge (erreur explicite) ; le Devkit n'en produit pas à notre connaissance.
 - Le pont Unreal est en lecture seule et expérimental ; il suppose un éditeur ouvert avec
   *Python Remote Execution* activé.
 - L'import CSV → DataTable reste manuel dans le Devkit. Ne jamais réimporter une table de base du
